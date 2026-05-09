@@ -1,0 +1,555 @@
+/**
+ * StifLi Flex MCP - Admin Styles
+ *
+ * @package StifliFlexMcp
+ */
+
+/* =============================================================================
+   TOOLS PAGE (WordPress & WooCommerce tabs)
+   ============================================================================= */
+
+.sflmcp-tool-toggle {
+    cursor: pointer;
+    min-width: 100px;
+}
+
+.sflmcp-tool-toggle.status-enabled {
+    color: #46b450;
+    border-color: #46b450;
+}
+
+.sflmcp-tool-toggle.status-disabled {
+    color: #999;
+}
+
+.sflmcp-tool-toggle.updating {
+    opacity: 0.5;
+    cursor: wait;
+}
+
+.sflmcp-tool-toggle .dashicons {
+    vertical-align: middle;
+    margin-right: 3px;
+}
+
+.sflmcp-tools-category {
+    background: #fff;
+    border: 1px solid #dcdcde;
+    border-radius: 8px;
+    margin: 12px 0;
+    overflow: hidden;
+}
+
+.sflmcp-tools-category summary {
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px;
+    cursor: pointer;
+}
+
+.sflmcp-tools-category summary::-webkit-details-marker {
+    display: none;
+}
+
+.sflmcp-tools-category .sflmcp-chevron {
+    color: #646970;
+    width: 14px;
+    text-align: center;
+}
+
+.sflmcp-tools-category[open] .sflmcp-chevron {
+    transform: rotate(90deg);
+}
+
+.sflmcp-tools-category-title {
+    font-weight: 600;
+}
+
+.sflmcp-tools-category-meta {
+    margin-left: auto;
+    color: #50575e;
+    font-size: 12px;
+}
+
+.sflmcp-tools-category-body {
+    border-top: 1px solid #dcdcde;
+    padding: 12px 14px;
+}
+
+.sflmcp-tool-mode-badge {
+    display: inline-block;
+    font-size: 11px;
+    line-height: 1;
+    padding: 4px 7px;
+    border-radius: 999px;
+    font-weight: 600;
+}
+
+.sflmcp-tool-mode-badge.sflmcp-mode-read {
+    background: #e8f4ff;
+    color: #125e9c;
+}
+
+.sflmcp-tool-mode-badge.sflmcp-mode-write {
+    background: #fff4e5;
+    color: #a35a00;
+}
+
+/* Summary layout with three columns */
+.sflmcp-tools-category summary {
+    display: flex;
+    align-items: center;
+    padding: 12px 14px;
+    cursor: pointer;
+    list-style: none;
+}
+
+.sflmcp-summary-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    min-width: 0;
+}
+
+.sflmcp-summary-left input[type="checkbox"] {
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+/* Indeterminate state: some tools enabled but not all */
+.sflmcp-summary-left input[type="checkbox"].sflmcp-partial {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    background-color: #8a9baa;
+    border: 1px solid #5f7a8e;
+    border-radius: 2px;
+    cursor: pointer;
+    vertical-align: middle;
+    flex-shrink: 0;
+    /* White dash in the center to indicate partial selection */
+    background-image: linear-gradient(#fff, #fff);
+    background-size: 55% 2px;
+    background-position: center;
+    background-repeat: no-repeat;
+}
+
+.sflmcp-chevron {
+    display: inline-block;
+    font-size: 12px;
+    transition: transform 0.2s ease;
+}
+
+.sflmcp-tools-category[open] .sflmcp-chevron {
+    transform: rotate(90deg);
+}
+
+.sflmcp-summary-right {
+    flex: 1;
+    text-align: right;
+    min-width: 120px;
+    padding-right: 4px;
+}
+
+.sflmcp-enabled-count {
+    font-size: 12px;
+    color: #50575e;
+    white-space: nowrap;
+    transition: color 0.2s ease, font-weight 0.2s ease;
+}
+
+/* Some tools enabled */
+.sflmcp-enabled-count.sflmcp-count-partial {
+    color: #1a5276;
+}
+
+/* All tools enabled */
+.sflmcp-enabled-count.sflmcp-count-full {
+    color: #001d3d;
+    font-weight: 700;
+}
+
+/* read/write labels in summary (only shown when there are enabled tools of that type) */
+.sflmcp-mode-label {
+    color: #001d3d;
+    font-weight: 600;
+}
+
+.sflmcp-summary-right {
+    flex-shrink: 0;
+    text-align: right;
+    min-width: 100px;
+}
+
+.sflmcp-tokens-label {
+    font-size: 12px;
+    color: #50575e;
+    white-space: nowrap;
+}
+
+/* Checkbox styling in table rows */
+.sflmcp-tools-col-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.sflmcp-tools-col-checkbox input[type="checkbox"] {
+    cursor: pointer;
+    flex-shrink: 0;
+    margin: 0;
+}
+
+.sflmcp-tools-col-checkbox code {
+    word-break: break-all;
+}
+
+/* =============================================================================
+   HELP PAGE
+   ============================================================================= */
+
+.sflmcp-help {
+    max-width: 900px;
+}
+
+.sflmcp-help h2 {
+    border-bottom: 2px solid #2271b1;
+    padding-bottom: 10px;
+    margin-top: 30px;
+}
+
+.sflmcp-help h3 {
+    color: #1d2327;
+    margin-top: 25px;
+}
+
+.sflmcp-help .card {
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    padding: 20px;
+    margin: 15px 0;
+    border-left: 4px solid #2271b1;
+}
+
+.sflmcp-help .card.warning {
+    border-left-color: #dba617;
+    background: #fcf9e8;
+}
+
+.sflmcp-help .card.success {
+    border-left-color: #00a32a;
+    background: #edfaef;
+}
+
+.sflmcp-help .card.example {
+    border-left-color: #9b59b6;
+    background: #f9f5fc;
+}
+
+.sflmcp-help code {
+    background: #f0f0f1;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 13px;
+}
+
+.sflmcp-help pre {
+    background: #1d2327;
+    color: #f0f0f1;
+    padding: 15px;
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 12px;
+}
+
+.sflmcp-help pre code {
+    background: transparent;
+    color: inherit;
+}
+
+.sflmcp-help table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 15px 0;
+}
+
+.sflmcp-help th,
+.sflmcp-help td {
+    border: 1px solid #c3c4c7;
+    padding: 10px;
+    text-align: left;
+}
+
+.sflmcp-help th {
+    background: #f0f0f1;
+}
+
+.sflmcp-help .toc {
+    background: #f6f7f7;
+    padding: 20px;
+    border-radius: 4px;
+}
+
+.sflmcp-help .toc ul {
+    columns: 2;
+}
+
+.sflmcp-help .toc a {
+    text-decoration: none;
+}
+
+.sflmcp-help .badge {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: bold;
+}
+
+.sflmcp-help .badge-http {
+    background: #3498db;
+    color: #fff;
+}
+
+.sflmcp-help .badge-action {
+    background: #9b59b6;
+    color: #fff;
+}
+
+.sflmcp-hidden {
+    display: none;
+}
+
+.sflmcp-mb-4 {
+    margin-bottom: 4px;
+}
+
+.sflmcp-color-success {
+    color: #00a32a;
+}
+
+.sflmcp-align-middle {
+    vertical-align: middle;
+}
+
+.sflmcp-code-xs {
+    font-size: 11px;
+}
+
+/* =============================================================================
+   SETTINGS PAGE
+   ============================================================================= */
+
+.sflmcp-settings-connect {
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-left: 4px solid #2271b1;
+    padding: 24px 28px;
+    margin: 20px 0;
+    max-width: 720px;
+}
+
+.sflmcp-settings-connect h2 {
+    margin-top: 0;
+    font-size: 1.4em;
+    color: #1d2327;
+}
+
+.sflmcp-settings-url-box {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 16px 0 20px;
+}
+
+.sflmcp-settings-url-box code {
+    flex: 1;
+    display: block;
+    background: #f0f6fc;
+    border: 1px solid #2271b1;
+    padding: 10px 14px;
+    font-size: 14px;
+    word-break: break-all;
+    border-radius: 4px;
+}
+
+.sflmcp-settings-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin: 16px 0 0;
+}
+
+.sflmcp-settings-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.sflmcp-step-number {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    background: #2271b1;
+    color: #fff;
+    border-radius: 50%;
+    font-weight: 600;
+    font-size: 14px;
+    flex-shrink: 0;
+}
+
+.sflmcp-settings-step strong {
+    display: block;
+    margin-bottom: 2px;
+}
+
+.sflmcp-settings-step .description {
+    margin-top: 2px;
+}
+
+.sflmcp-settings-status {
+    margin-top: 16px;
+    padding: 10px 14px;
+    background: #edfaef;
+    border: 1px solid #00a32a;
+    border-radius: 4px;
+    font-size: 13px;
+}
+
+.sflmcp-settings-status .dashicons {
+    margin-right: 4px;
+    vertical-align: text-bottom;
+}
+
+.sflmcp-settings-details-toggle {
+    margin: 16px 0;
+    max-width: 720px;
+}
+
+.sflmcp-settings-details-toggle .dashicons {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+    margin-right: 2px;
+}
+
+#sflmcp-settings-details {
+    max-width: 900px;
+}
+
+.sflmcp-settings-section {
+    margin: 24px 0;
+    padding-bottom: 20px;
+    border-bottom: 1px solid #e0e0e0;
+}
+
+.sflmcp-settings-section:last-child {
+    border-bottom: none;
+}
+
+.sflmcp-settings-section h3 {
+    font-size: 1.15em;
+    margin-bottom: 12px;
+}
+
+.sflmcp-settings-endpoint-code {
+    display: block;
+    background: #f0f0f0;
+    padding: 8px;
+    margin: 5px 0;
+    font-size: 13px;
+}
+
+.sflmcp-settings-endpoint-code.sflmcp-break-all {
+    word-break: break-all;
+}
+
+.sflmcp-profile-link {
+    margin-left: 10px;
+}
+
+.sflmcp-reseed-form {
+    margin-bottom: 20px;
+}
+
+.sflmcp-category-count {
+    font-weight: normal;
+}
+
+.sflmcp-tools-col-tool { width: 25%; }
+.sflmcp-tools-col-desc { width: 45%; }
+.sflmcp-tools-col-tokens { width: 15%; }
+.sflmcp-tools-col-status { width: 15%; }
+
+.sflmcp-profiles-col-radio { width: 5%; }
+.sflmcp-profiles-col-name { width: 18%; }
+.sflmcp-profiles-col-desc { width: 35%; }
+.sflmcp-profiles-col-tools { width: 12%; }
+.sflmcp-profiles-col-tokens { width: 12%; }
+.sflmcp-profiles-col-actions { width: 18%; }
+
+.sflmcp-profiles-custom-heading { margin-top: 30px; }
+
+.sflmcp-logs-col-enabled { width: 80px; text-align: center; }
+
+/* Profiles tab */
+.sflmcp-profiles-actions {
+    margin: 20px 0;
+}
+
+.sflmcp-profiles-token-info {
+    display: block;
+    font-size: 12px;
+}
+
+.sflmcp-active-dot {
+    color: #2271b1;
+    font-size: 20px;
+}
+
+.sflmcp-view-tools-link {
+    font-size: 12px;
+    text-decoration: none;
+}
+
+.sflmcp-hidden-file-input {
+    display: none;
+}
+
+/* Custom Tools tab */
+.sflmcp-form-row-grow {
+    flex-grow: 2;
+}
+
+.sflmcp-spacer {
+    flex-grow: 1;
+}
+
+#sflmcp_advanced_settings {
+    display: none;
+}
+
+/* Empty state */
+.sflmcp-empty-msg {
+    color: #666;
+    font-style: italic;
+}
+
+#sflmcp-copilot-settings-notice {
+    display: none;
+}
+
+.sflmcp-help-separator {
+    margin: 40px 0;
+}
+
+.sflmcp-help-footer {
+    text-align: center;
+    color: #666;
+}
