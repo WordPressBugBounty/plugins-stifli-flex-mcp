@@ -1566,8 +1566,16 @@ class StifliFlexMcp_ChangeTracker {
 	public static function migrateAddSourceColumns() {
 		global $wpdb;
 		$table = $wpdb->prefix . 'sflmcp_changelog';
+		$like = $wpdb->esc_like( $table );
+		$exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $like ) );
+		if ( $exists !== $table ) {
+			return;
+		}
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name from $wpdb->prefix is safe.
 		$cols = $wpdb->get_col( "SHOW COLUMNS FROM `{$table}`", 0 );
+		if ( ! is_array( $cols ) ) {
+			return;
+		}
 		if ( ! in_array( 'source', $cols, true ) ) {
 			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.DirectDatabaseQuery.SchemaChange,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- schema migration for plugin-managed changelog table.
 			$wpdb->query( "ALTER TABLE `{$table}` ADD COLUMN `source` VARCHAR(50) DEFAULT NULL AFTER `file_backup_path`, ADD COLUMN `source_label` VARCHAR(255) DEFAULT NULL AFTER `source`, ADD KEY `idx_source` (`source`)" );

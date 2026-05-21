@@ -3,7 +3,7 @@
 Plugin Name: StifLi Flex MCP - MCP Server with undo for ChatGPT, Claude & Gemini
 Plugin URI: https://github.com/estebanstifli/stifli-flex-mcp
 Description: Transform your WordPress site into a Model Context Protocol (MCP) server. Expose 117+ tools (55 WordPress, 61 WooCommerce, 1 Core + WordPress Abilities) that AI agents like ChatGPT, Claude, and LibreChat can use to manage your WordPress and WooCommerce site via JSON-RPC 2.0.
-Version: 3.3.3
+Version: 3.3.4
 Author: estebandestifli
 Requires PHP: 7.4
 License: GPL v2 or later
@@ -205,14 +205,56 @@ function stifli_flex_mcp_init_event_engine() {
 // Ensure automation cron is always running (for existing installs)
 add_action( 'init', 'stifli_flex_mcp_check_automation_cron', 99 );
 function stifli_flex_mcp_check_automation_cron() {
-	if ( ! wp_next_scheduled( 'sflmcp_process_automation_tasks' ) ) {
-		wp_schedule_event( time(), 'every_minute', 'sflmcp_process_automation_tasks' );
+	$schedules = wp_get_schedules();
+	if ( ! isset( $schedules['sflmcp_every_minute'] ) ) {
+		return;
 	}
+
+	$event = wp_get_scheduled_event( 'sflmcp_process_automation_tasks' );
+	if ( ! $event ) {
+		wp_schedule_event( time(), 'sflmcp_every_minute', 'sflmcp_process_automation_tasks' );
+		return;
+	}
+
+	$schedule = isset( $event->schedule ) ? $event->schedule : '';
+	if ( 'sflmcp_every_minute' !== $schedule ) {
+		$args = ( isset( $event->args ) && is_array( $event->args ) ) ? $event->args : array();
+		wp_unschedule_event( $event->timestamp, 'sflmcp_process_automation_tasks', $args );
+		wp_schedule_event( time(), 'sflmcp_every_minute', 'sflmcp_process_automation_tasks' );
+	}
+}
+
+function stifli_flex_mcp_table_exists( $table ) {
+	global $wpdb;
+	$like = $wpdb->esc_like( $table );
+	return $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $like ) ) === $table;
+}
+
+function stifli_flex_mcp_upsert_tool_row( $tool, $now ) {
+	global $wpdb;
+	$table = $wpdb->prefix . 'sflmcp_tools';
+
+	if ( ! stifli_flex_mcp_table_exists( $table ) ) {
+		return false;
+	}
+
+	$query = $wpdb->prepare(
+		"INSERT INTO {$table} (`tool_name`, `tool_description`, `category`, `enabled`, `created_at`, `updated_at`) VALUES (%s, %s, %s, %d, %s, %s) ON DUPLICATE KEY UPDATE `tool_description` = VALUES(`tool_description`), `category` = VALUES(`category`), `updated_at` = VALUES(`updated_at`)",
+		$tool[0],
+		$tool[1],
+		$tool[2],
+		$tool[3],
+		$now,
+		$now
+	);
+
+	return false !== $wpdb->query( $query );
 }
 
 add_action( 'sflmcp_process_generated_image_attachment', 'stifli_flex_mcp_process_generated_image_attachment', 10, 1 );
 function stifli_flex_mcp_process_generated_image_attachment( $attachment_id ) {
 	$attachment_id = absint( $attachment_id );
+
 	if ( ! $attachment_id ) {
 		return;
 	}
@@ -572,13 +614,11 @@ function stifli_flex_mcp_maybe_create_profile_tools_table() {
 function stifli_flex_mcp_seed_initial_tools() {
 	global $wpdb;
 	$table = $wpdb->prefix . 'sflmcp_tools';
-	
-	// Check if already seeded
-	$count = $wpdb->get_var("SELECT COUNT(*) FROM {$table}");
-	if ($count > 0) {
-		return; // Already seeded, don't insert duplicates
+
+	if ( ! stifli_flex_mcp_table_exists( $table ) ) {
+		return;
 	}
-	
+
 	$now = current_time('mysql', true);
 	
 	// Currently implemented tools
@@ -840,21 +880,18 @@ function stifli_flex_mcp_seed_initial_tools() {
 	$tools[] = array('wc_update_webhook', 'Update a webhook.', 'WooCommerce - Webhooks', 1);
 	$tools[] = array('wc_delete_webhook', 'Delete a webhook.', 'WooCommerce - Webhooks', 1);
 	
-	
-	foreach ($tools as $tool) {
-		$wpdb->insert(
-			$table,
-			array(
-				'tool_name' => $tool[0],
-				'tool_description' => $tool[1],
-				'category' => $tool[2],
-				'enabled' => $tool[3],
-				'created_at' => $now,
-				'updated_at' => $now,
-			),
-			array('%s', '%s', '%s', '%d', '%s', '%s')
-		);
+
+	$seed_hash = md5( (string) wp_json_encode( $tools ) );
+	$count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" );
+	if ( get_option( 'sflmcp_initial_tools_seed_hash' ) === $seed_hash && $count >= count( $tools ) ) {
+		return;
 	}
+
+	foreach ($tools as $tool) {
+		stifli_flex_mcp_upsert_tool_row( $tool, $now );
+	}
+
+	update_option( 'sflmcp_initial_tools_seed_hash', $seed_hash, false );
 }
 
 /**
@@ -870,6 +907,12 @@ function stifli_flex_mcp_upgrade_302() {
 
 	$table = $wpdb->prefix . 'sflmcp_tools';
 	$now   = current_time( 'mysql', true );
+	$profiles_table      = $wpdb->prefix . 'sflmcp_profiles';
+	$profile_tools_table = $wpdb->prefix . 'sflmcp_profile_tools';
+
+	if ( ! stifli_flex_mcp_table_exists( $table ) || ! stifli_flex_mcp_table_exists( $profiles_table ) || ! stifli_flex_mcp_table_exists( $profile_tools_table ) ) {
+		return;
+	}
 
 	// Seed snippet tools if missing.
 	$snippet_tools = array(
@@ -897,8 +940,6 @@ function stifli_flex_mcp_upgrade_302() {
 	}
 
 	// Add snippet tools to "WordPress Full Management" profile if missing.
-	$profiles_table      = $wpdb->prefix . 'sflmcp_profiles';
-	$profile_tools_table = $wpdb->prefix . 'sflmcp_profile_tools';
 	$profile_id = $wpdb->get_var( $wpdb->prepare(
 		"SELECT id FROM {$profiles_table} WHERE profile_name = %s AND is_system = 1 LIMIT 1",
 		'WordPress Full Management'
@@ -940,6 +981,19 @@ function stifli_flex_mcp_maybe_upgrade_db() {
 	if ( $current === SFLMCP_DB_VERSION ) {
 		return;
 	}
+
+	global $wpdb;
+	$required_tables = array(
+		$wpdb->prefix . 'sflmcp_tools',
+		$wpdb->prefix . 'sflmcp_profiles',
+		$wpdb->prefix . 'sflmcp_profile_tools',
+	);
+	foreach ( $required_tables as $table ) {
+		if ( ! stifli_flex_mcp_table_exists( $table ) ) {
+			return;
+		}
+	}
+
 	// Place new migrations here in chronological order.
 	stifli_flex_mcp_upgrade_remove_wp_delete_option();
 	stifli_flex_mcp_upgrade_323_seed_new_tools();
@@ -963,6 +1017,10 @@ function stifli_flex_mcp_upgrade_remove_wp_delete_option() {
 	}
 	$tools_table = $wpdb->prefix . 'sflmcp_tools';
 	$profile_tools_table = $wpdb->prefix . 'sflmcp_profile_tools';
+
+	if ( ! stifli_flex_mcp_table_exists( $tools_table ) || ! stifli_flex_mcp_table_exists( $profile_tools_table ) ) {
+		return;
+	}
 
 	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
 	$wpdb->delete( $tools_table, array( 'tool_name' => 'wp_delete_option' ), array( '%s' ) );
@@ -1060,6 +1118,10 @@ function stifli_flex_mcp_upgrade_remove_unified_seo_tools() {
 	$tools_table = $wpdb->prefix . 'sflmcp_tools';
 	$profile_tools_table = $wpdb->prefix . 'sflmcp_profile_tools';
 	$tool_names = array( 'wp_get_seo_meta', 'wp_update_seo_meta' );
+
+	if ( ! stifli_flex_mcp_table_exists( $tools_table ) || ! stifli_flex_mcp_table_exists( $profile_tools_table ) ) {
+		return;
+	}
 
 	foreach ( $tool_names as $tool_name ) {
 		$wpdb->delete( $tools_table, array( 'tool_name' => $tool_name ), array( '%s' ) );
@@ -1352,6 +1414,10 @@ function stifli_flex_mcp_upgrade_rankmath_tools() {
 	$tools_table = $wpdb->prefix . 'sflmcp_tools';
 	$now = current_time( 'mysql', true );
 
+	if ( ! stifli_flex_mcp_table_exists( $tools_table ) ) {
+		return;
+	}
+
 	$rankmath_tools = array(
 		array( 'wp_rm_get_head', 'Get rendered SEO head HTML for a URL using Rank Math endpoint. Requires Headless CMS Support enabled.', 'WordPress - SEO', 1 ),
 		array( 'wp_rm_get_post_seo', 'Get Rank Math SEO metadata fields for a post.', 'WordPress - SEO', 1 ),
@@ -1448,6 +1514,10 @@ function stifli_flex_mcp_upgrade_rankmath_profile_detach() {
 	$rankmath_tool_names = array( 'wp_rm_get_head', 'wp_rm_get_post_seo', 'wp_rm_update_post_seo' );
 	$profile_names = array( 'WordPress Full Management', 'Development/Debug', 'Complete Site' );
 
+	if ( ! stifli_flex_mcp_table_exists( $profiles_table ) || ! stifli_flex_mcp_table_exists( $profile_tools_table ) ) {
+		return;
+	}
+
 	foreach ( $profile_names as $profile_name ) {
 		$profile_id = $wpdb->get_var( $wpdb->prepare(
 			"SELECT id FROM {$profiles_table} WHERE profile_name = %s AND is_system = 1 LIMIT 1",
@@ -1476,14 +1546,16 @@ function stifli_flex_mcp_seed_system_profiles() {
 	global $wpdb;
 	$profiles_table = $wpdb->prefix . 'sflmcp_profiles';
 	$profile_tools_table = $wpdb->prefix . 'sflmcp_profile_tools';
+	$tools_table = $wpdb->prefix . 'sflmcp_tools';
 	$rankmath_tools = array( 'wp_rm_get_head', 'wp_rm_get_post_seo', 'wp_rm_update_post_seo' );
-	
-	// Check if system profiles already seeded
-	$count = $wpdb->get_var("SELECT COUNT(*) FROM {$profiles_table} WHERE is_system = 1");
-	if ($count > 0) {
-		return; // Already seeded
+
+	if ( ! stifli_flex_mcp_table_exists( $profiles_table ) || ! stifli_flex_mcp_table_exists( $profile_tools_table ) || ! stifli_flex_mcp_table_exists( $tools_table ) ) {
+		return;
 	}
-	
+
+	$system_profile_count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$profiles_table} WHERE is_system = 1" );
+	$active_profile_id = (int) $wpdb->get_var( "SELECT id FROM {$profiles_table} WHERE is_active = 1 LIMIT 1" );
+	$had_active_profile = $active_profile_id > 0;
 	$now = current_time('mysql', true);
 	
 	// Define system profiles with their tools
@@ -1696,27 +1768,75 @@ function stifli_flex_mcp_seed_system_profiles() {
 	);
 	
 	// Get all available tools for "Complete Site" profile
-	$all_tools = $wpdb->get_col("SELECT tool_name FROM {$wpdb->prefix}sflmcp_tools");
-	
+	$all_tools = $wpdb->get_col("SELECT tool_name FROM {$tools_table}");
+	$all_tools = is_array( $all_tools ) ? $all_tools : array();
+	sort( $all_tools );
+
+	$seed_hash = md5( (string) wp_json_encode( $system_profiles ) . '|' . implode( '|', $all_tools ) );
+	if ( get_option( 'sflmcp_system_profiles_seed_hash' ) === $seed_hash && $system_profile_count >= count( $system_profiles ) && $active_profile_id > 0 ) {
+		return;
+	}
+
 	// Insert profiles
 	foreach ($system_profiles as $profile) {
 		// Set "WordPress Full Management" as the default active profile
-		$is_active = ($profile['name'] === 'WordPress Full Management') ? 1 : 0;
-		
-		$wpdb->insert(
-			$profiles_table,
-			array(
-				'profile_name' => $profile['name'],
+		$should_activate = ( ! $active_profile_id && $profile['name'] === 'WordPress Full Management' );
+		$profile_id = (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT id FROM {$profiles_table} WHERE profile_name = %s AND is_system = 1 LIMIT 1",
+				$profile['name']
+			)
+		);
+
+		if ( $profile_id ) {
+			$profile_update = array(
 				'profile_description' => $profile['description'],
 				'is_system' => 1,
-				'is_active' => $is_active,
-				'created_at' => $now,
 				'updated_at' => $now,
-			),
-			array('%s', '%s', '%d', '%d', '%s', '%s')
-		);
-		
-		$profile_id = $wpdb->insert_id;
+			);
+			$profile_formats = array( '%s', '%d', '%s' );
+			if ( $should_activate ) {
+				$profile_update['is_active'] = 1;
+				$profile_formats[] = '%d';
+				$active_profile_id = $profile_id;
+			}
+			$wpdb->update(
+				$profiles_table,
+				$profile_update,
+				array( 'id' => $profile_id ),
+				$profile_formats,
+				array( '%d' )
+			);
+		} else {
+			$wpdb->insert(
+				$profiles_table,
+				array(
+					'profile_name' => $profile['name'],
+					'profile_description' => $profile['description'],
+					'is_system' => 1,
+					'is_active' => $should_activate ? 1 : 0,
+					'created_at' => $now,
+					'updated_at' => $now,
+				),
+				array('%s', '%s', '%d', '%d', '%s', '%s')
+			);
+			$profile_id = (int) $wpdb->insert_id;
+			if ( ! $profile_id ) {
+				$profile_id = (int) $wpdb->get_var(
+					$wpdb->prepare(
+						"SELECT id FROM {$profiles_table} WHERE profile_name = %s AND is_system = 1 LIMIT 1",
+						$profile['name']
+					)
+				);
+			}
+			if ( $should_activate && $profile_id ) {
+				$active_profile_id = $profile_id;
+			}
+		}
+
+		if ( ! $profile_id ) {
+			continue;
+		}
 		
 		// Get tools list
 		$tools = ($profile['tools'] === 'ALL') ? $all_tools : $profile['tools'];
@@ -1724,21 +1844,23 @@ function stifli_flex_mcp_seed_system_profiles() {
 		
 		// Insert profile tools
 		foreach ($tools as $tool_name) {
-			$wpdb->insert(
-				$profile_tools_table,
-				array(
-					'profile_id' => $profile_id,
-					'tool_name' => $tool_name,
-					'created_at' => $now,
-				),
-				array('%d', '%s', '%s')
+			$query = $wpdb->prepare(
+				"INSERT INTO {$profile_tools_table} (`profile_id`, `tool_name`, `created_at`) VALUES (%d, %s, %s) ON DUPLICATE KEY UPDATE `tool_name` = VALUES(`tool_name`)",
+				$profile_id,
+				$tool_name,
+				$now
 			);
+			$wpdb->query( $query );
 		}
 	}
-	
+
+	update_option( 'sflmcp_system_profiles_seed_hash', $seed_hash, false );
+
 	// Apply the default active profile (WordPress Full Management)
 	// This disables tools not in the profile (like WooCommerce tools)
-	stifli_flex_mcp_apply_active_profile();
+	if ( ! $system_profile_count || ! $had_active_profile ) {
+		stifli_flex_mcp_apply_active_profile();
+	}
 }
 
 /**
@@ -1751,6 +1873,10 @@ function stifli_flex_mcp_apply_active_profile() {
 	$profiles_table = $wpdb->prefix . 'sflmcp_profiles';
 	$profile_tools_table = $wpdb->prefix . 'sflmcp_profile_tools';
 	$tools_table = $wpdb->prefix . 'sflmcp_tools';
+
+	if ( ! stifli_flex_mcp_table_exists( $profiles_table ) || ! stifli_flex_mcp_table_exists( $profile_tools_table ) || ! stifli_flex_mcp_table_exists( $tools_table ) ) {
+		return;
+	}
 	
 	// Get active profile ID
 	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- profile lookup for activation.
@@ -1806,6 +1932,10 @@ function stifli_flex_mcp_apply_plugin_integration_overrides() {
 	}
 
 	$tools_table = $wpdb->prefix . 'sflmcp_tools';
+	if ( ! stifli_flex_mcp_table_exists( $tools_table ) ) {
+		return;
+	}
+
 	$integration_ids = StifliFlexMcp_Plugin_Integrations_Registry::get_integration_ids();
 	if ( empty( $integration_ids ) ) {
 		return;
@@ -1934,14 +2064,11 @@ if (!function_exists('stifli_flex_mcp_maybe_create_custom_tools_table')) {
 function stifli_flex_mcp_seed_custom_tools_examples() {
 	global $wpdb;
 	$table = $wpdb->prefix . 'sflmcp_custom_tools';
-	
-	// Check if already seeded (any row exists)
-	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Plugin-managed table, table name is safe.
-	$count = $wpdb->get_var( "SELECT COUNT(*) FROM `$table`" );
-	if ( $count > 0 ) {
+
+	if ( ! stifli_flex_mcp_table_exists( $table ) ) {
 		return;
 	}
-	
+
 	$site_url = site_url();
 	
 	$examples = array(
@@ -2227,13 +2354,27 @@ function stifli_flex_mcp_seed_custom_tools_examples() {
 		)
 	);
 	
-	foreach ($examples as $tool) {
-		$wpdb->insert(
-			$table,
-			$tool,
-			array('%s', '%s', '%s', '%s', '%s', '%s', '%d')
-		);
+	$seed_hash = md5( (string) wp_json_encode( $examples ) );
+	$count = (int) $wpdb->get_var( "SELECT COUNT(*) FROM `{$table}`" );
+	if ( get_option( 'sflmcp_custom_tools_examples_seed_hash' ) === $seed_hash && $count >= count( $examples ) ) {
+		return;
 	}
+
+	foreach ($examples as $tool) {
+		$query = $wpdb->prepare(
+			"INSERT INTO `{$table}` (`tool_name`, `tool_description`, `method`, `endpoint`, `headers`, `arguments`, `enabled`) VALUES (%s, %s, %s, %s, %s, %s, %d) ON DUPLICATE KEY UPDATE `tool_description` = VALUES(`tool_description`), `method` = VALUES(`method`), `endpoint` = VALUES(`endpoint`), `headers` = VALUES(`headers`), `arguments` = VALUES(`arguments`)",
+			$tool['tool_name'],
+			$tool['tool_description'],
+			$tool['method'],
+			$tool['endpoint'],
+			$tool['headers'],
+			$tool['arguments'],
+			$tool['enabled']
+		);
+		$wpdb->query( $query );
+	}
+
+	update_option( 'sflmcp_custom_tools_examples_seed_hash', $seed_hash, false );
 }
 
 function stifli_flex_mcp_ensure_clean_queue_event() {
@@ -3152,9 +3293,23 @@ function stifli_flex_mcp_maybe_create_event_logs_table() {
 function stifli_flex_mcp_ensure_automation_cron() {
 	// Register custom intervals for automation
 	add_filter('cron_schedules', 'stifli_flex_mcp_automation_cron_schedules');
-	
-	if (!wp_next_scheduled('sflmcp_process_automation_tasks')) {
-		wp_schedule_event(time(), 'every_minute', 'sflmcp_process_automation_tasks');
+
+	$schedules = wp_get_schedules();
+	if ( ! isset( $schedules['sflmcp_every_minute'] ) ) {
+		return;
+	}
+
+	$event = wp_get_scheduled_event('sflmcp_process_automation_tasks');
+	if (!$event) {
+		wp_schedule_event(time(), 'sflmcp_every_minute', 'sflmcp_process_automation_tasks');
+		return;
+	}
+
+	$schedule = isset($event->schedule) ? $event->schedule : '';
+	if ('sflmcp_every_minute' !== $schedule) {
+		$args = (isset($event->args) && is_array($event->args)) ? $event->args : array();
+		wp_unschedule_event($event->timestamp, 'sflmcp_process_automation_tasks', $args);
+		wp_schedule_event(time(), 'sflmcp_every_minute', 'sflmcp_process_automation_tasks');
 	}
 }
 
@@ -3162,22 +3317,40 @@ function stifli_flex_mcp_ensure_automation_cron() {
  * Add custom cron schedules for automation
  */
 function stifli_flex_mcp_automation_cron_schedules($schedules) {
+	if (!isset($schedules['sflmcp_every_minute'])) {
+		$schedules['sflmcp_every_minute'] = array(
+			'interval' => 60,
+			'display'  => 'Every Minute',
+		);
+	}
 	if (!isset($schedules['every_minute'])) {
 		$schedules['every_minute'] = array(
 			'interval' => 60,
-			'display'  => __('Every Minute', 'stifli-flex-mcp'),
+			'display'  => 'Every Minute',
+		);
+	}
+	if (!isset($schedules['sflmcp_every_2_hours'])) {
+		$schedules['sflmcp_every_2_hours'] = array(
+			'interval' => 7200,
+			'display'  => 'Every 2 Hours',
 		);
 	}
 	if (!isset($schedules['every_2_hours'])) {
 		$schedules['every_2_hours'] = array(
 			'interval' => 7200,
-			'display'  => __('Every 2 Hours', 'stifli-flex-mcp'),
+			'display'  => 'Every 2 Hours',
+		);
+	}
+	if (!isset($schedules['sflmcp_every_6_hours'])) {
+		$schedules['sflmcp_every_6_hours'] = array(
+			'interval' => 21600,
+			'display'  => 'Every 6 Hours',
 		);
 	}
 	if (!isset($schedules['every_6_hours'])) {
 		$schedules['every_6_hours'] = array(
 			'interval' => 21600,
-			'display'  => __('Every 6 Hours', 'stifli-flex-mcp'),
+			'display'  => 'Every 6 Hours',
 		);
 	}
 	return $schedules;
@@ -3203,39 +3376,43 @@ function stifli_flex_mcp_run_automation_tasks() {
 	}
 }
 
+function stifli_flex_mcp_install_schema() {
+	stifli_flex_mcp_maybe_create_queue_table();
+	stifli_flex_mcp_maybe_create_tools_table();
+	stifli_flex_mcp_maybe_add_tools_token_column();
+	stifli_flex_mcp_maybe_create_custom_tools_table();
+	stifli_flex_mcp_maybe_create_abilities_table();
+	stifli_flex_mcp_maybe_create_profiles_table();
+	stifli_flex_mcp_maybe_create_profile_tools_table();
+
+	stifli_flex_mcp_maybe_create_automation_tasks_table();
+	stifli_flex_mcp_maybe_create_automation_logs_table();
+	stifli_flex_mcp_maybe_create_automation_templates_table();
+	stifli_flex_mcp_maybe_create_event_triggers_table();
+	stifli_flex_mcp_maybe_create_event_automations_table();
+	stifli_flex_mcp_maybe_create_event_logs_table();
+
+	if ( class_exists( 'StifliFlexMcp_ChangeTracker' ) ) {
+		StifliFlexMcp_ChangeTracker::createTable();
+		StifliFlexMcp_ChangeTracker::migrateAddSourceColumns();
+	}
+
+	if ( class_exists( 'StifliFlexMcp_OAuth_Storage' ) ) {
+		StifliFlexMcp_OAuth_Storage::create_tables();
+	}
+}
+
 register_activation_hook(__FILE__, 'stifli_flex_mcp_activate');
 register_deactivation_hook(__FILE__, 'stifli_flex_mcp_deactivate');
 
 function stifli_flex_mcp_activate() {
-	stifli_flex_mcp_maybe_create_queue_table();
-	stifli_flex_mcp_maybe_create_tools_table();
-	stifli_flex_mcp_maybe_create_custom_tools_table();
-	stifli_flex_mcp_maybe_create_abilities_table();
-	stifli_flex_mcp_maybe_add_tools_token_column();
-	stifli_flex_mcp_maybe_create_profiles_table();
-	stifli_flex_mcp_maybe_create_profile_tools_table();
-	
-	// Automation tables
-	stifli_flex_mcp_maybe_create_automation_tasks_table();
-	stifli_flex_mcp_maybe_create_automation_logs_table();
-	stifli_flex_mcp_maybe_create_automation_templates_table();
-	
-	// Event automations tables
-	stifli_flex_mcp_maybe_create_event_triggers_table();
-	stifli_flex_mcp_maybe_create_event_automations_table();
-	stifli_flex_mcp_maybe_create_event_logs_table();
+	stifli_flex_mcp_install_schema();
 	stifli_flex_mcp_seed_event_triggers();
 	
 	stifli_flex_mcp_seed_initial_tools();
 	stifli_flex_mcp_seed_custom_tools_examples();
 	stifli_flex_mcp_seed_system_profiles();
-
-	// Changelog table (Change Tracker)
-	StifliFlexMcp_ChangeTracker::createTable();
-	StifliFlexMcp_ChangeTracker::migrateAddSourceColumns();
-
-	// OAuth 2.1 tables
-	StifliFlexMcp_OAuth_Storage::create_tables();
+	stifli_flex_mcp_maybe_upgrade_db();
 	stifli_flex_mcp_sync_tool_token_estimates();
 	stifli_flex_mcp_ensure_clean_queue_event();
 	stifli_flex_mcp_ensure_clean_changelog_event();
@@ -3483,29 +3660,10 @@ global $stifliFlexMcp;
 add_action('plugins_loaded', function() {
 	global $stifli_flex_mcp_instance;
 	global $stifliFlexMcp;
-	
-	stifli_flex_mcp_maybe_create_queue_table();
-	stifli_flex_mcp_maybe_create_tools_table();
-	stifli_flex_mcp_maybe_create_custom_tools_table();
-	stifli_flex_mcp_maybe_create_abilities_table();
-	stifli_flex_mcp_maybe_add_tools_token_column();
-	stifli_flex_mcp_maybe_create_profiles_table();
-	stifli_flex_mcp_maybe_create_profile_tools_table();
-	
-	// Automation tables (with migration for existing tables)
-	stifli_flex_mcp_maybe_create_automation_tasks_table();
-	stifli_flex_mcp_maybe_create_automation_logs_table();
-	
-	// OAuth 2.1 tables (idempotent - CREATE TABLE IF NOT EXISTS)
-	if ( class_exists( 'StifliFlexMcp_OAuth_Storage' ) ) {
-		StifliFlexMcp_OAuth_Storage::create_tables();
-	}
 
-	// Changelog source columns migration
-	if ( class_exists( 'StifliFlexMcp_ChangeTracker' ) ) {
-		StifliFlexMcp_ChangeTracker::migrateAddSourceColumns();
-	}
+	stifli_flex_mcp_install_schema();
 	
+	stifli_flex_mcp_seed_event_triggers();
 	stifli_flex_mcp_seed_custom_tools_examples();
 	stifli_flex_mcp_seed_initial_tools();
 	stifli_flex_mcp_seed_system_profiles();

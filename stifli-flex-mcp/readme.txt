@@ -5,7 +5,7 @@ Donate link: https://github.com/estebanstifli/stifli-flex-mcp
 Tags:  mcp, chatgpt, claude, woocommerce ai, copilot
 Requires at least: 5.8
 Tested up to: 7.0
-Stable tag: 3.3.3
+Stable tag: 3.3.4
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -21,6 +21,14 @@ Three powerful MCP and AI tools in one plugin:
 1. **MCP Server** — Connect ChatGPT, Claude Desktop, or any MCP client directly to your site
 2. **AI Copilot** — A floating assistant inside the Gutenberg and Classic editors that writes, rewrites, and optimizes your content in real time
 3. **AI Chat Agent** — A full conversational interface to manage posts, WooCommerce, settings, and more
+
+**🎬 Video: Claude to WordPress MCP Connector in 1 Minute**
+
+https://youtu.be/AcmvwRzoOSM
+
+**📚 Documentation**
+
+https://andromedanova.com/stifli-flex-mcp.html
 
 Released in December 2025, **StifLi Flex MCP** was the first MCP plugin for WordPress and remains the most complete WordPress MCP platform for ChatGPT, Claude Desktop, and other MCP clients.
 It starts with 117+ built-in MCP tools, and with supported integrations such as All Sources Images, Stifli Backup Tools, AiPatch Security Scanner, Notification for Telegram, WPCode, Code Snippets, Woody Snippets, Advanced Custom Fields, Yoast SEO, Rank Math, WPForms, Gravity Forms, Forminator, and The Events Calendar, it can exceed 200 total tools depending on the plugins you install.
@@ -195,10 +203,6 @@ StifLi Flex MCP integrates with:
 **📐 MCP Spec Compliance**
 
 StifLi Flex MCP implements the [Model Context Protocol (MCP) 2025-11-25 specification](https://modelcontextprotocol.io/specification/2025-11-25/) for lifecycle and tool operations over JSON-RPC 2.0, while keeping legacy SSE compatibility for older MCP clients.
-
-**Demo & Installation Tutorial:**
-
-https://youtu.be/KHr1zt2R8Ew
 
 == Installation ==
 
@@ -400,6 +404,9 @@ This plugin connects to third-party AI services to power the AI Chat Agent, AI C
 When using the MCP server with external AI clients (ChatGPT, Claude Desktop, LibreChat, etc.), API requests are made by the AI client's backend servers to your WordPress MCP endpoint. The plugin itself does not send data to third parties in this scenario — the external MCP client initiates all communication.
 
 == Changelog ==
+= 3.3.4 =
+* Improvement: Various improvements and content updates in the plugin documentation and onboarding resources.
+
 = 3.3.3 =
 * Improvement: Upgraded the Abilities admin table with sortable columns, row selection, and bulk actions (enable, disable, remove).
 * Improvement: Upgraded Discover Abilities with category filtering and bulk import actions for selected or visible abilities.

@@ -3,7 +3,48 @@ if ( ! defined( 'ABSPATH' ) ) exit; // Exit if accessed directly
 
 // Model MCP con tools completas + intención/consentimiento
 class StifliFlexMcpModel {
-    private $tools = false;
+    private $tools = array();
+
+    private function maybeLoadFile( $relative_path, $class_name = '' ) {
+        if ( $class_name && class_exists( $class_name ) ) {
+            return true;
+        }
+
+        $file = dirname( __FILE__ ) . '/' . ltrim( $relative_path, '/\\' );
+        if ( ! file_exists( $file ) ) {
+            return false;
+        }
+
+        require_once $file;
+
+        return ! $class_name || class_exists( $class_name );
+    }
+
+    private function maybeLoadSnippetsModule() {
+        return $this->maybeLoadFile( 'snippets/snippets.php', 'StifliFlexMcp_Snippets' );
+    }
+
+    private function maybeLoadWooCommerceModules() {
+        if ( ! class_exists( 'WooCommerce' ) ) {
+            return false;
+        }
+
+        $loaded = false;
+        $modules = array(
+            'woocommerce/wc-products.php'          => 'StifliFlexMcp_WC_Products',
+            'woocommerce/wc-orders.php'            => 'StifliFlexMcp_WC_Orders',
+            'woocommerce/wc-customers-coupons.php' => 'StifliFlexMcp_WC_Coupons',
+            'woocommerce/wc-system.php'            => 'StifliFlexMcp_WC_System',
+        );
+
+        foreach ( $modules as $relative_path => $class_name ) {
+            if ( $this->maybeLoadFile( $relative_path, $class_name ) ) {
+                $loaded = true;
+            }
+        }
+
+        return $loaded;
+    }
 
     /**
      * Dispatch a Custom Tool (Webhook/API call or WordPress Action)
@@ -1654,9 +1695,8 @@ class StifliFlexMcpModel {
                 ),
             );
 
-            // Merge Snippets tools if a snippet plugin is available
-            require_once dirname(__FILE__) . '/snippets/snippets.php';
-            if ( class_exists( 'StifliFlexMcp_Snippets' ) ) {
+            // Merge Snippets tools if the optional module is available.
+            if ( $this->maybeLoadSnippetsModule() && class_exists( 'StifliFlexMcp_Snippets' ) ) {
                 $tools = array_merge( $tools, StifliFlexMcp_Snippets::getTools() );
             }
 
@@ -1667,12 +1707,7 @@ class StifliFlexMcpModel {
 
             // Merge WooCommerce tools if available
             // Lazy load modules ensures compatibility with all load orders
-            if ( class_exists( 'WooCommerce' ) ) {
-                require_once dirname(__FILE__) . '/woocommerce/wc-products.php';
-                require_once dirname(__FILE__) . '/woocommerce/wc-orders.php';
-                require_once dirname(__FILE__) . '/woocommerce/wc-customers-coupons.php';
-                require_once dirname(__FILE__) . '/woocommerce/wc-system.php';
-
+            if ( $this->maybeLoadWooCommerceModules() ) {
                 if ( class_exists( 'StifliFlexMcp_WC_Products' ) ) {
                     $tools = array_merge( $tools, StifliFlexMcp_WC_Products::getTools() );
                 }
@@ -1698,8 +1733,10 @@ class StifliFlexMcpModel {
         if (!empty($custom_tools)) {
             foreach ($custom_tools as $tool) {
                 // Ensure proper structure
-                if (!isset($tool['name']) || !isset($tool['inputSchema'])) continue;
-                $this->tools[$tool['name']] = $tool;
+                if ( ! is_array( $tool ) || ! isset( $tool['name'] ) || ! isset( $tool['inputSchema'] ) ) continue;
+                $tool_name = $tool['name'];
+                if ( ! is_string( $tool_name ) || '' === $tool_name ) continue;
+                $this->tools[ $tool_name ] = $tool;
             }
         }
         
@@ -1707,8 +1744,10 @@ class StifliFlexMcpModel {
         $abilities = $this->getImportedAbilities();
         if (!empty($abilities)) {
             foreach ($abilities as $tool) {
-                if (!isset($tool['name']) || !isset($tool['inputSchema'])) continue;
-                $this->tools[$tool['name']] = $tool;
+                if ( ! is_array( $tool ) || ! isset( $tool['name'] ) || ! isset( $tool['inputSchema'] ) ) continue;
+                $tool_name = $tool['name'];
+                if ( ! is_string( $tool_name ) || '' === $tool_name ) continue;
+                $this->tools[ $tool_name ] = $tool;
             }
         }
         
@@ -2061,7 +2100,7 @@ class StifliFlexMcpModel {
         );
 
         // Merge WooCommerce capabilities if available
-        if ( class_exists( 'WooCommerce' ) ) {
+        if ( $this->maybeLoadWooCommerceModules() ) {
             if ( class_exists( 'StifliFlexMcp_WC_Products' ) ) {
                 $map = array_merge( $map, StifliFlexMcp_WC_Products::getCapabilities() );
             }
@@ -2080,7 +2119,7 @@ class StifliFlexMcpModel {
         }
 
         // Merge Snippets capabilities if available
-        if ( class_exists( 'StifliFlexMcp_Snippets' ) ) {
+        if ( $this->maybeLoadSnippetsModule() && class_exists( 'StifliFlexMcp_Snippets' ) ) {
             $map = array_merge( $map, StifliFlexMcp_Snippets::getCapabilities() );
         }
 
@@ -2092,6 +2131,7 @@ class StifliFlexMcpModel {
     }
 
     public function dispatchTool($tool, $args, $id = null) {
+        $tool = is_string( $tool ) ? $tool : ( is_scalar( $tool ) ? (string) $tool : '' );
         $r = array('jsonrpc' => '2.0', 'id' => $id);
         $utils = 'StifliFlexMcpUtils';
         $frame = class_exists('StifliFlexMcpFrame') ? StifliFlexMcpFrame::_() : null;
@@ -2316,7 +2356,7 @@ class StifliFlexMcpModel {
 
         // Validate args against tool schema (basic) before dispatching
         $tools_map = $this->getTools();
-        if (isset($tools_map[$tool]) && !empty($tools_map[$tool]['inputSchema'])) {
+        if ( isset( $tools_map[ $tool ] ) && is_array( $tools_map[ $tool ] ) && ! empty( $tools_map[ $tool ]['inputSchema'] ) ) {
             $schema = $tools_map[$tool]['inputSchema'];
             $errMsg = '';
             if (!$this->validateArgumentsSchema($schema, is_array($args) ? $args : array(), $errMsg)) {
@@ -5325,7 +5365,7 @@ class StifliFlexMcpModel {
                 $ys_scope = 'site-wide';
                 if ( $ys_post_id ) {
                     // Delete indexable for the post so Yoast rebuilds it on next request.
-                    if ( class_exists( 'Yoast\\WP\\SEO\\Repositories\\Indexable_Repository' ) ) {
+                    if ( function_exists( 'YoastSEO' ) && class_exists( 'Yoast\\WP\\SEO\\Repositories\\Indexable_Repository' ) ) {
                         $ys_repo = \YoastSEO()->classes->get( 'Yoast\\WP\\SEO\\Repositories\\Indexable_Repository' );
                         if ( $ys_repo ) {
                             $ys_indexable = $ys_repo->find_by_id_and_type( $ys_post_id, 'post', false );
@@ -6161,11 +6201,7 @@ class StifliFlexMcpModel {
             default:
                 // Try to route to WooCommerce modules if tool starts with wc_
                 if ( strpos( $tool, 'wc_' ) === 0 && class_exists( 'WooCommerce' ) ) {
-                    // Lazy load WC modules if not already loaded
-                    require_once dirname(__FILE__) . '/woocommerce/wc-products.php';
-                    require_once dirname(__FILE__) . '/woocommerce/wc-orders.php';
-                    require_once dirname(__FILE__) . '/woocommerce/wc-customers-coupons.php';
-                    require_once dirname(__FILE__) . '/woocommerce/wc-system.php';
+                    $this->maybeLoadWooCommerceModules();
                     
                     // Try WC Products module
                     if ( class_exists( 'StifliFlexMcp_WC_Products' ) ) {
@@ -6215,13 +6251,18 @@ class StifliFlexMcpModel {
                 
                 // Try Snippets module (snippet_* tools)
                 if ( strpos( $tool, 'snippet_' ) === 0 ) {
-                    require_once dirname(__FILE__) . '/snippets/snippets.php';
-                    if ( class_exists( 'StifliFlexMcp_Snippets' ) ) {
+                    if ( $this->maybeLoadSnippetsModule() && class_exists( 'StifliFlexMcp_Snippets' ) ) {
                         $result = StifliFlexMcp_Snippets::dispatch( $tool, $args, $r, $addResultText, $utils );
                         if ( $result !== null ) {
                             $recordChangeIfNeeded();
                             return $r;
                         }
+                    } else {
+                        $r['error'] = array(
+                            'code' => -32603,
+                            'message' => 'Snippet tools module is not installed in this plugin package.',
+                        );
+                        return $r;
                     }
                 }
 
@@ -6898,6 +6939,8 @@ class StifliFlexMcpModel {
      * @return array The result array.
      */
     private function dispatchAbility( $tool, $args, $rpcId, $r ) {
+        $tool = is_string( $tool ) ? $tool : ( is_scalar( $tool ) ? (string) $tool : '' );
+
         // Check if WordPress Abilities API is available
         if ( ! function_exists( 'wp_get_ability' ) ) {
             $r['error'] = array(
@@ -6909,7 +6952,7 @@ class StifliFlexMcpModel {
 
         // Get the original ability name from the tool definition
         $tools = $this->getTools();
-        if ( ! isset( $tools[ $tool ] ) || ! isset( $tools[ $tool ]['_ability_name'] ) ) {
+        if ( ! isset( $tools[ $tool ] ) || ! is_array( $tools[ $tool ] ) || ! isset( $tools[ $tool ]['_ability_name'] ) ) {
             $r['error'] = array(
                 'code' => -32602,
                 'message' => 'Ability not found or not properly configured',
