@@ -2,8 +2,8 @@
 /*
 Plugin Name: StifLi Flex MCP - MCP Server with undo for ChatGPT, Claude & Gemini
 Plugin URI: https://github.com/estebanstifli/stifli-flex-mcp
-Description: Transform your WordPress site into a Model Context Protocol (MCP) server. Expose 117+ tools (55 WordPress, 61 WooCommerce, 1 Core + WordPress Abilities) that AI agents like ChatGPT, Claude, and LibreChat can use to manage your WordPress and WooCommerce site via JSON-RPC 2.0.
-Version: 3.3.4
+Description: Transform your WordPress site into a Model Context Protocol (MCP) server. Expose 125+ tools across WordPress, WooCommerce, SEO, plugin integrations, and WordPress Abilities that AI agents like ChatGPT, Claude, and LibreChat can use via JSON-RPC 2.0.
+Version: 3.3.7
 Author: estebandestifli
 Requires PHP: 7.4
 License: GPL v2 or later
@@ -24,9 +24,14 @@ if ( ! defined( 'SFLMCP_DEBUG' ) ) {
 // Debug logging function
 if (!function_exists('stifli_flex_mcp_log')) {
 	function stifli_flex_mcp_log($message, array $context = []) {
+		$force_logging = !empty($context['_force']);
+		if (isset($context['_force'])) {
+			unset($context['_force']);
+		}
+
 		// Check if logging is enabled via option (admin setting) or constant
 		$logging_enabled = get_option('sflmcp_logging_enabled', false);
-		if (!$logging_enabled && (!defined('SFLMCP_DEBUG') || SFLMCP_DEBUG !== true)) {
+		if (!$force_logging && !$logging_enabled && (!defined('SFLMCP_DEBUG') || SFLMCP_DEBUG !== true)) {
 			return;
 		}
 
@@ -160,6 +165,101 @@ require_once __DIR__ . '/controller.php';
 require_once __DIR__ . '/mod.php';
 require_once __DIR__ . '/add-on/plugins/class-plugin-integrations-registry.php';
 require_once __DIR__ . '/add-on/plugins/class-plugin-integrations-admin.php';
+
+if ( ! function_exists( 'stifli_flex_mcp_load_google_search_console_module' ) ) {
+	function stifli_flex_mcp_load_google_search_console_module() {
+		if ( class_exists( 'StifliFlexMcp_GoogleSearchConsole' ) ) {
+			return true;
+		}
+
+		$file = __DIR__ . '/models/external-data/class-google-search-console.php';
+		if ( ! file_exists( $file ) ) {
+			return false;
+		}
+
+		require_once $file;
+
+		return class_exists( 'StifliFlexMcp_GoogleSearchConsole' );
+	}
+}
+
+if ( ! function_exists( 'stifli_flex_mcp_is_gsc_enabled_for_runtime' ) ) {
+	function stifli_flex_mcp_is_gsc_enabled_for_runtime() {
+		$settings = get_option( 'sflmcp_seo_settings', array() );
+		if ( ! is_array( $settings ) ) {
+			return false;
+		}
+
+		return isset( $settings['gsc_enabled'] )
+			&& '1' === (string) $settings['gsc_enabled']
+			&& ! empty( $settings['gsc_oauth_client_id'] )
+			&& ! empty( $settings['gsc_oauth_client_secret'] )
+			&& ! empty( $settings['gsc_oauth_refresh_token'] );
+	}
+}
+
+if ( ! function_exists( 'stifli_flex_mcp_is_seo_admin_request' ) ) {
+	function stifli_flex_mcp_is_seo_admin_request() {
+		if ( ! is_admin() ) {
+			return false;
+		}
+
+		$page = isset( $_GET['page'] ) ? sanitize_key( wp_unslash( $_GET['page'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		if ( 'sflmcp-seo' === $page ) {
+			return true;
+		}
+
+		$action = isset( $_REQUEST['action'] ) ? sanitize_key( wp_unslash( $_REQUEST['action'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		if ( '' === $action ) {
+			return false;
+		}
+
+		return in_array(
+			$action,
+			array(
+				'sflmcp_seo_save_settings',
+				'sflmcp_seo_load_settings',
+				'sflmcp_seo_test_gsc',
+				'sflmcp_seo_disconnect_gsc',
+				'sflmcp_seo_remove_gsc_credentials',
+				'sflmcp_seo_clear_gsc_cache',
+				'sflmcp_seo_toggle_tool',
+				'sflmcp_gsc_oauth_start',
+				'sflmcp_gsc_oauth_callback',
+			),
+			true
+		);
+	}
+}
+
+if ( ! function_exists( 'stifli_flex_mcp_load_seo_admin_module' ) ) {
+	function stifli_flex_mcp_load_seo_admin_module() {
+		static $seo_admin = null;
+
+		if ( null !== $seo_admin ) {
+			return $seo_admin;
+		}
+
+		if ( ! stifli_flex_mcp_load_google_search_console_module() ) {
+			return null;
+		}
+
+		if ( ! class_exists( 'StifliFlexMcp_SEO_Admin' ) ) {
+			$file = __DIR__ . '/add-on/seo/class-seo-admin.php';
+			if ( ! file_exists( $file ) ) {
+				return null;
+			}
+			require_once $file;
+		}
+
+		if ( ! class_exists( 'StifliFlexMcp_SEO_Admin' ) ) {
+			return null;
+		}
+
+		$seo_admin = new StifliFlexMcp_SEO_Admin( false );
+		return $seo_admin;
+	}
+}
 
 // Load AI Chat Agent
 require_once __DIR__ . '/client/providers/class-provider-base.php';
@@ -731,6 +831,15 @@ function stifli_flex_mcp_seed_initial_tools() {
 		array('yoast_get_meta', 'Get Yoast SEO meta fields for a post (title, description, OG, Twitter). Requires Yoast SEO.', 'WordPress - SEO', 1),
 		array('yoast_set_meta', 'Set Yoast SEO meta fields for a post. Requires Yoast SEO.', 'WordPress - SEO', 1),
 		array('yoast_reindex', 'Clear Yoast SEO indexables cache for a post or site-wide. Requires Yoast SEO.', 'WordPress - SEO', 1),
+		// SEO - Google Search Console
+		array('wp_gsc_list_sites', 'List Google Search Console properties available to the connected Google account.', 'SEO - Google Search Console', 1),
+		array('wp_gsc_query_performance', 'Query compact Google Search Console performance data with capped rows and pagination.', 'SEO - Google Search Console', 1),
+		array('wp_gsc_inspect_url', 'Inspect a URL using the Google Search Console URL Inspection API.', 'SEO - Google Search Console', 1),
+		array('wp_gsc_list_sitemaps', 'List submitted sitemaps for a Google Search Console property.', 'SEO - Google Search Console', 1),
+		array('wp_seo_find_gsc_opportunities', 'Find SEO opportunities by combining GSC data with WordPress posts and SEO metadata.', 'SEO - Google Search Console', 1),
+		array('wp_seo_get_post_context', 'Get compact SEO context for a post with current metadata and capped GSC query data.', 'SEO - Optimization', 1),
+		array('wp_seo_suggest_title_meta_from_gsc', 'Suggest SEO title and meta description candidates from GSC query data without writing changes.', 'SEO - Optimization', 1),
+		array('wp_seo_apply_title_meta_safe', 'Safely apply SEO title and meta description to Yoast or Rank Math with rollback support.', 'SEO - Optimization', 1),
 		// ACF
 		array('acf_get_field_groups', 'List all ACF field groups with keys, titles and location rules. Requires ACF.', 'Plugins - ACF', 1),
 		array('acf_get_fields', 'Get ACF field values for a post. Requires ACF.', 'Plugins - ACF', 1),
@@ -752,8 +861,9 @@ function stifli_flex_mcp_seed_initial_tools() {
 		array('wp_tec_list_entities', 'List or get The Events Calendar venues and organizers.', 'Plugins - The Events Calendar', 1),
 		array('wp_tec_save_entity', 'Create or update a The Events Calendar venue or organizer. Uses undo snapshots before AI changes.', 'Plugins - The Events Calendar', 1),
 		array('wp_tec_trash_event', 'Safely move a The Events Calendar event to trash with undo support.', 'Plugins - The Events Calendar', 1),
-		array('wp_generate_image', 'Generate an image using AI and save it as a WordPress media attachment.', 'WordPress - Utilities', 1),
-		array('wp_generate_video', 'Generate a video using AI (Google Veo or OpenAI Sora) and save it as a WordPress media attachment.', 'WordPress - Utilities', 1),
+		array('wp_generate_image', 'Generate an image using AI and save it as a WordPress media attachment.', 'WordPress - Media', 1),
+		array('wp_generate_video', 'Generate a video using AI (Google Veo or OpenAI Sora) and save it as a WordPress media attachment.', 'WordPress - Media', 1),
+		array('wp_search_image', 'Search Unsplash, Pexels, or Pixabay and return one image URL with attribution metadata.', 'WordPress - Media', 0),
 		
 		// Changelog / Audit Log
 		array('mcp_get_changelog', 'Get the changelog/audit log of MCP tool operations with filters and pagination.', 'WordPress - Changelog', 1),
@@ -969,7 +1079,7 @@ function stifli_flex_mcp_upgrade_302() {
  * installs run the migration once and only once.
  */
 if ( ! defined( 'SFLMCP_DB_VERSION' ) ) {
-	define( 'SFLMCP_DB_VERSION', '2026.05.14' );
+	define( 'SFLMCP_DB_VERSION', '2026.05.27.1' );
 }
 
 /**
@@ -1000,6 +1110,8 @@ function stifli_flex_mcp_maybe_upgrade_db() {
 	stifli_flex_mcp_upgrade_324_seed_plugin_settings_tool();
 	stifli_flex_mcp_upgrade_329_seed_wc_variation_attribute_coupon_tools();
 	stifli_flex_mcp_upgrade_tec_seed_tools();
+	stifli_flex_mcp_upgrade_elementor_integration_tools();
+	stifli_flex_mcp_upgrade_gsc_tools();
 	stifli_flex_mcp_upgrade_remove_unified_seo_tools();
 	update_option( 'sflmcp_db_version', SFLMCP_DB_VERSION, false );
 }
@@ -1372,7 +1484,7 @@ function stifli_flex_mcp_upgrade_tec_seed_tools() {
 
 /**
  * Upgrade routine: remove legacy Elementor tools from core tables.
- * Elementor tools now live only in the standalone Elementor plugin.
+ * Current Elementor tools are re-seeded later as plugin integration tools.
  */
 function stifli_flex_mcp_upgrade_remove_core_elementor_tools() {
 	global $wpdb;
@@ -1489,6 +1601,102 @@ function stifli_flex_mcp_upgrade_plugin_integration_tools() {
 					'enabled'          => $tool[3],
 					'created_at'       => $now,
 					'updated_at'       => $now,
+				),
+				array( '%s', '%s', '%s', '%d', '%s', '%s' )
+			);
+		}
+	}
+
+	update_option( $flag, '1' );
+}
+
+/**
+ * Upgrade routine: add Elementor integration tools for existing installs.
+ */
+function stifli_flex_mcp_upgrade_elementor_integration_tools() {
+	global $wpdb;
+	$flag = 'sflmcp_upgrade_elementor_integration_tools_done';
+	if ( get_option( $flag ) ) {
+		return;
+	}
+
+	$tools_table = $wpdb->prefix . 'sflmcp_tools';
+	if ( ! stifli_flex_mcp_table_exists( $tools_table ) ) {
+		return;
+	}
+
+	$now = current_time( 'mysql', true );
+	$new_tools = array(
+		array( 'elementor_clone_page', 'Duplicate an existing Elementor post/page with fresh element IDs and Elementor meta.', 'Plugins - Elementor', 1 ),
+		array( 'elementor_replace_text', 'Replace text in known Elementor widget fields, with dry_run support.', 'Plugins - Elementor', 1 ),
+		array( 'elementor_replace_image', 'Swap image URLs and optional attachment IDs in Elementor settings, with dry_run support.', 'Plugins - Elementor', 1 ),
+		array( 'elementor_replace_link', 'Replace URLs in Elementor link fields for buttons, CTAs and repeaters, with dry_run support.', 'Plugins - Elementor', 1 ),
+		array( 'elementor_get_page_outline', 'Get a compact Elementor page outline with widget types and text snippets.', 'Plugins - Elementor', 1 ),
+		array( 'elementor_list_local_templates', 'List saved Elementor templates from the local template library.', 'Plugins - Elementor', 1 ),
+		array( 'elementor_import_template', 'Create a local Elementor template from exported JSON or an elements array.', 'Plugins - Elementor', 1 ),
+	);
+
+	foreach ( $new_tools as $tool ) {
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+		$exists = $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$tools_table} WHERE tool_name = %s", $tool[0] ) );
+		if ( ! $exists ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+			$wpdb->insert(
+				$tools_table,
+				array(
+					'tool_name' => $tool[0],
+					'tool_description' => $tool[1],
+					'category' => $tool[2],
+					'enabled' => $tool[3],
+					'created_at' => $now,
+					'updated_at' => $now,
+				),
+				array( '%s', '%s', '%s', '%d', '%s', '%s' )
+			);
+		}
+	}
+
+	update_option( $flag, '1' );
+}
+
+/**
+ * Upgrade routine: add Google Search Console SEO tools for existing installs.
+ */
+function stifli_flex_mcp_upgrade_gsc_tools() {
+	global $wpdb;
+	$flag = 'sflmcp_upgrade_gsc_tools_done';
+	if ( get_option( $flag ) ) {
+		return;
+	}
+
+	$tools_table = $wpdb->prefix . 'sflmcp_tools';
+	if ( ! stifli_flex_mcp_table_exists( $tools_table ) ) {
+		return;
+	}
+
+	$now = current_time( 'mysql', true );
+	$new_tools = array(
+		array( 'wp_gsc_list_sites', 'List Google Search Console properties available to the connected Google account.', 'SEO - Google Search Console', 1 ),
+		array( 'wp_gsc_query_performance', 'Query compact Google Search Console performance data with capped rows and pagination.', 'SEO - Google Search Console', 1 ),
+		array( 'wp_gsc_inspect_url', 'Inspect a URL using the Google Search Console URL Inspection API.', 'SEO - Google Search Console', 1 ),
+		array( 'wp_gsc_list_sitemaps', 'List submitted sitemaps for a Google Search Console property.', 'SEO - Google Search Console', 1 ),
+		array( 'wp_seo_find_gsc_opportunities', 'Find SEO opportunities by combining GSC data with WordPress posts and SEO metadata.', 'SEO - Google Search Console', 1 ),
+	);
+
+	foreach ( $new_tools as $tool ) {
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+		$exists = $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$tools_table} WHERE tool_name = %s", $tool[0] ) );
+		if ( ! $exists ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+			$wpdb->insert(
+				$tools_table,
+				array(
+					'tool_name' => $tool[0],
+					'tool_description' => $tool[1],
+					'category' => $tool[2],
+					'enabled' => $tool[3],
+					'created_at' => $now,
+					'updated_at' => $now,
 				),
 				array( '%s', '%s', '%s', '%d', '%s', '%s' )
 			);
@@ -1706,7 +1914,7 @@ function stifli_flex_mcp_seed_system_profiles() {
 		),
 		array(
 			'name' => 'Complete Site',
-			'description' => 'All available tools (WordPress + WooCommerce = 117 tools)',
+			'description' => 'All available tools across WordPress, WooCommerce, SEO, plugin integrations, and abilities',
 			'tools' => 'ALL', // Special marker to include all tools
 		),
 		array(
@@ -3413,6 +3621,8 @@ function stifli_flex_mcp_activate() {
 	stifli_flex_mcp_seed_custom_tools_examples();
 	stifli_flex_mcp_seed_system_profiles();
 	stifli_flex_mcp_maybe_upgrade_db();
+	stifli_flex_mcp_upgrade_elementor_integration_tools();
+	stifli_flex_mcp_upgrade_gsc_tools();
 	stifli_flex_mcp_sync_tool_token_estimates();
 	stifli_flex_mcp_ensure_clean_queue_event();
 	stifli_flex_mcp_ensure_clean_changelog_event();
@@ -3671,6 +3881,8 @@ add_action('plugins_loaded', function() {
 	stifli_flex_mcp_upgrade_remove_core_elementor_tools();
 	stifli_flex_mcp_upgrade_rankmath_tools();
 	stifli_flex_mcp_upgrade_plugin_integration_tools();
+	stifli_flex_mcp_upgrade_elementor_integration_tools();
+	stifli_flex_mcp_upgrade_gsc_tools();
 	stifli_flex_mcp_upgrade_rankmath_profile_detach();
 	stifli_flex_mcp_apply_plugin_integration_overrides();
 	stifli_flex_mcp_sync_tool_token_estimates();
@@ -3684,6 +3896,18 @@ add_action('plugins_loaded', function() {
 		if ( class_exists( 'StifliFlexMcp_Plugin_Integrations_Admin' ) ) {
 			$plugin_integrations_admin = new StifliFlexMcp_Plugin_Integrations_Admin( $stifli_flex_mcp_instance );
 			$plugin_integrations_admin->init();
+		}
+
+		if (
+			stifli_flex_mcp_is_gsc_enabled_for_runtime()
+			&& stifli_flex_mcp_load_google_search_console_module()
+			&& class_exists( 'StifliFlexMcp_GoogleSearchConsole' )
+		) {
+			StifliFlexMcp_GoogleSearchConsole::init();
+		}
+
+		if ( stifli_flex_mcp_is_seo_admin_request() ) {
+			stifli_flex_mcp_load_seo_admin_module();
 		}
 		
 		// Create global reference with model for client

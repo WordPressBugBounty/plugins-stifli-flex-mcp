@@ -24,6 +24,146 @@ class StifliFlexMcpModel {
         return $this->maybeLoadFile( 'snippets/snippets.php', 'StifliFlexMcp_Snippets' );
     }
 
+    private function isPluginMarkedActive( $plugin_file ) {
+        $plugin_file = is_string( $plugin_file ) ? trim( $plugin_file ) : '';
+        if ( '' === $plugin_file ) {
+            return false;
+        }
+
+        if ( function_exists( 'is_plugin_active' ) && is_plugin_active( $plugin_file ) ) {
+            return true;
+        }
+
+        $active_plugins = (array) get_option( 'active_plugins', array() );
+        if ( in_array( $plugin_file, $active_plugins, true ) ) {
+            return true;
+        }
+
+        if ( is_multisite() ) {
+            $network_active = (array) get_site_option( 'active_sitewide_plugins', array() );
+            if ( isset( $network_active[ $plugin_file ] ) ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function isElementorRuntimeAvailable() {
+        return class_exists( 'Elementor\\Plugin' )
+            || defined( 'ELEMENTOR_VERSION' )
+            || $this->isPluginMarkedActive( 'elementor/elementor.php' );
+    }
+
+    private function maybeLoadElementorIntegrationModule() {
+        if ( class_exists( 'StifliFlexMcp_Elementor' ) ) {
+            return true;
+        }
+
+        if ( ! $this->isElementorRuntimeAvailable() ) {
+            return false;
+        }
+
+        return $this->maybeLoadFile( 'integrations/class-elementor.php', 'StifliFlexMcp_Elementor' );
+    }
+
+    private function maybeLoadGoogleSearchConsoleModule() {
+        if ( class_exists( 'StifliFlexMcp_GoogleSearchConsole' ) ) {
+            StifliFlexMcp_GoogleSearchConsole::init();
+            return true;
+        }
+
+        if ( ! $this->isGoogleSearchConsoleRuntimeEnabled() ) {
+            return false;
+        }
+
+        $loaded = function_exists( 'stifli_flex_mcp_load_google_search_console_module' )
+            ? stifli_flex_mcp_load_google_search_console_module()
+            : $this->maybeLoadFile( 'external-data/class-google-search-console.php', 'StifliFlexMcp_GoogleSearchConsole' );
+
+        if ( $loaded && class_exists( 'StifliFlexMcp_GoogleSearchConsole' ) ) {
+            StifliFlexMcp_GoogleSearchConsole::init();
+            return true;
+        }
+
+        return false;
+    }
+
+    private function maybeLoadSearchImageModule() {
+        if ( class_exists( 'StifliFlexMcp_Search_Image' ) ) {
+            return true;
+        }
+
+        if ( ! $this->isToolEnabledForRuntime( 'wp_search_image' ) ) {
+            return false;
+        }
+
+        return $this->maybeLoadFile( 'media/class-search-image.php', 'StifliFlexMcp_Search_Image' );
+    }
+
+    private function isToolEnabledForRuntime( $tool_name ) {
+        global $wpdb;
+
+        $tool_name = is_string( $tool_name ) ? $tool_name : '';
+        if ( '' === $tool_name ) {
+            return false;
+        }
+
+        $table = StifliFlexMcpUtils::getPrefixedTable( 'sflmcp_tools', false );
+        $like  = $wpdb->esc_like( $table );
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- schema introspection requires SHOW TABLES with LIKE pattern.
+        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $like ) ) !== $table ) {
+            return false;
+        }
+
+        $table_sql = StifliFlexMcpUtils::getPrefixedTable( 'sflmcp_tools' );
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.InterpolatedNotPrepared, WordPress.DB.PreparedSQL.NotPrepared, PluginCheck.Security.DirectDB.UnescapedDBParameter -- table name from sanitized helper.
+        $enabled = $wpdb->get_var(
+            $wpdb->prepare( "SELECT enabled FROM {$table_sql} WHERE tool_name = %s LIMIT 1", $tool_name )
+        );
+
+        return '1' === (string) $enabled;
+    }
+
+    private function isGoogleSearchConsoleRuntimeEnabled() {
+        if ( function_exists( 'stifli_flex_mcp_is_gsc_enabled_for_runtime' ) ) {
+            return stifli_flex_mcp_is_gsc_enabled_for_runtime();
+        }
+
+        if ( class_exists( 'StifliFlexMcp_GoogleSearchConsole' ) ) {
+            return StifliFlexMcp_GoogleSearchConsole::toolsAreEnabled();
+        }
+
+        return false;
+    }
+
+    private function isGoogleSearchConsoleTool( $tool ) {
+        return 0 === strpos( (string) $tool, 'wp_gsc_' )
+            || in_array(
+                (string) $tool,
+                array(
+                    'wp_seo_find_gsc_opportunities',
+                    'wp_seo_get_post_context',
+                    'wp_seo_suggest_title_meta_from_gsc',
+                    'wp_seo_apply_title_meta_safe',
+                ),
+                true
+            );
+    }
+
+    private function getGoogleSearchConsoleCapabilities() {
+        return array(
+            'wp_gsc_list_sites' => 'manage_options',
+            'wp_gsc_query_performance' => 'manage_options',
+            'wp_gsc_inspect_url' => 'manage_options',
+            'wp_gsc_list_sitemaps' => 'manage_options',
+            'wp_seo_find_gsc_opportunities' => 'manage_options',
+            'wp_seo_get_post_context' => 'manage_options',
+            'wp_seo_suggest_title_meta_from_gsc' => 'manage_options',
+            'wp_seo_apply_title_meta_safe' => 'manage_options',
+        );
+    }
+
     private function maybeLoadWooCommerceModules() {
         if ( ! class_exists( 'WooCommerce' ) ) {
             return false;
@@ -212,6 +352,8 @@ class StifliFlexMcpModel {
             'wp_rm_update_post_seo',
             // Yoast SEO write
             'yoast_set_meta',
+            // SEO optimization write
+            'wp_seo_apply_title_meta_safe',
             // ACF write
             'acf_update_field',
             // Gravity Forms write
@@ -260,6 +402,9 @@ class StifliFlexMcpModel {
             // Snippet write operations
             'snippet_create','snippet_update','snippet_delete',
             'snippet_activate','snippet_deactivate',
+            // Elementor write operations
+            'elementor_clone_page','elementor_replace_text','elementor_replace_image',
+            'elementor_replace_link','elementor_import_template',
             // Changelog write operations
             'mcp_rollback_change','mcp_redo_change','mcp_rollback_session',
             
@@ -301,7 +446,11 @@ class StifliFlexMcpModel {
             // Snippet sensitive reads (code content)
             'snippet_list','snippet_get',
             // Changelog sensitive reads
-            'mcp_get_changelog','mcp_get_change_detail'
+            'mcp_get_changelog','mcp_get_change_detail',
+            // Google Search Console external SEO data
+            'wp_gsc_list_sites','wp_gsc_query_performance','wp_gsc_inspect_url',
+            'wp_gsc_list_sitemaps','wp_seo_find_gsc_opportunities',
+            'wp_seo_get_post_context','wp_seo_suggest_title_meta_from_gsc'
         );
 
         if (in_array($name, $WRITE, true)) {
@@ -357,6 +506,11 @@ class StifliFlexMcpModel {
                 continue;
             }
 
+            // Always emit a valid object schema for MCP clients.
+            $tool['inputSchema'] = StifliFlexMcpUtils::normalizeToolInputSchema(
+                isset( $tool['inputSchema'] ) ? $tool['inputSchema'] : array()
+            );
+
             $allowed_by_integration = apply_filters('sflmcp_is_tool_enabled_for_integrations', true, $name, 'list', $tool);
             if (!$allowed_by_integration) {
                 continue;
@@ -369,9 +523,14 @@ class StifliFlexMcpModel {
             // Abilities are already filtered by enabled=1 in getImportedAbilities()
             // So if the tool starts with 'ability_', it's already enabled
             $is_ability = strpos($name, 'ability_') === 0;
+
+            // Integration-managed tools can be enabled via the Plugins tab state,
+            // even when a legacy install is missing their rows in sflmcp_tools.
+            $is_integration_tool = class_exists( 'StifliFlexMcp_Plugin_Integrations_Registry' )
+                && ! empty( StifliFlexMcp_Plugin_Integrations_Registry::get_integrations_for_tool( $name ) );
             
             // If table doesn't exist, tool is in enabled list, or it's a custom tool/ability, include it
-            if (!$table_exists || array_key_exists($name, $enabled_tools) || $is_custom_tool || $is_ability) {
+            if (!$table_exists || array_key_exists($name, $enabled_tools) || $is_custom_tool || $is_ability || $is_integration_tool) {
                 // Categoría
                 if (in_array($name, array('search', 'fetch'), true)) {
                     $tool['category'] = 'Core: OpenAI';
@@ -380,7 +539,7 @@ class StifliFlexMcpModel {
                 } elseif ($is_ability) {
                     $tool['category'] = isset($tool['category']) ? $tool['category'] : 'Abilities';
                 } else {
-                    $tool['category'] = 'Core';
+                    $tool['category'] = isset($tool['category']) ? $tool['category'] : 'Core';
                 }
                 // Intención y consentimiento
                 $meta = $this->getIntentForTool($name);
@@ -460,23 +619,24 @@ class StifliFlexMcpModel {
                 // Posts (mutación)
                 'wp_create_post' => array(
                     'name' => 'wp_create_post',
-                    'description' => 'Create a post. Requires post_title. Optional: post_content, post_status, post_type, post_excerpt, post_author, featured_media (attachment ID), meta_input, post_category, tax_input, etc.',
+                    'description' => 'Create a post. Requires post_title. Optional: post_content, post_status, post_type, post_excerpt, post_author, featured_media, meta_input, post_category, tax_input.',
                     'inputSchema' => array(
                         'type' => 'object',
                         'properties' => array(
-                            'post_title'   => array('type' => 'string'),
-                            'post_content' => array('type' => 'string'),
-                            'post_status'  => array('type' => 'string'),
-                            'post_type'    => array('type' => 'string'),
-                            'post_excerpt' => array('type' => 'string'),
-                            'post_author'  => array('type' => 'integer'),
-                            'featured_media' => array('type' => 'integer', 'description' => 'Attachment ID to use as featured image (thumbnail).'),
-                            'meta_input'   => array('type' => 'object'),
-                            'post_name'    => array('type' => 'string'),
-                            'post_category'=> array('type' => 'array', 'items' => array('type' => 'integer')),
-                            'tax_input'    => array('type' => 'object'),
+                            'post_title'   => array('type' => 'string', 'description' => 'Post title.'),
+                            'post_content' => array('type' => 'string', 'description' => 'Post content, HTML or Gutenberg blocks.'),
+                            'post_status'  => array('type' => 'string', 'description' => 'Post status: draft, publish, pending, private, future.', 'default' => 'draft'),
+                            'post_type'    => array('type' => 'string', 'description' => 'Post type.', 'default' => 'post'),
+                            'post_excerpt' => array('type' => 'string', 'description' => 'Post excerpt.'),
+                            'post_author'  => array('type' => 'integer', 'description' => 'Author user ID.'),
+                            'featured_media' => array('type' => 'integer', 'description' => 'Attachment ID to use as featured image. Use 0 or omit for none.'),
+                            'meta_input'   => array('type' => 'object', 'description' => 'Post meta as key/value object. Use {} when empty.', 'additionalProperties' => true),
+                            'post_name'    => array('type' => 'string', 'description' => 'Post slug. Leave empty to let WordPress generate it.'),
+                            'post_category'=> array('type' => 'array', 'description' => 'Array of category IDs.', 'items' => array('type' => 'integer')),
+                            'tax_input'    => array('type' => 'object', 'description' => 'Taxonomy terms object, e.g. {"post_tag":[1,2]} or {"category":[1850]}. Use {} when empty.', 'additionalProperties' => true),
                         ),
                         'required' => array('post_title'),
+                        'additionalProperties' => false,
                     ),
                 ),
                 'wp_update_post' => array(
@@ -1705,6 +1865,21 @@ class StifliFlexMcpModel {
                 $tools = array_merge( $tools, StifliFlexMcp_TheEventsCalendar::getTools() );
             }
 
+            // Merge Elementor tools when Elementor is active. Integration settings decide visibility.
+            if ( $this->maybeLoadElementorIntegrationModule() && class_exists( 'StifliFlexMcp_Elementor' ) ) {
+                $tools = array_merge( $tools, StifliFlexMcp_Elementor::getTools() );
+            }
+
+            // Merge Google Search Console tools only when the optional SEO add-on is enabled.
+            if ( $this->isGoogleSearchConsoleRuntimeEnabled() && $this->maybeLoadGoogleSearchConsoleModule() && class_exists( 'StifliFlexMcp_GoogleSearchConsole' ) ) {
+                $tools = array_merge( $tools, StifliFlexMcp_GoogleSearchConsole::getTools() );
+            }
+
+            // Merge Search Image only when the multimedia tool is enabled.
+            if ( $this->maybeLoadSearchImageModule() && class_exists( 'StifliFlexMcp_Search_Image' ) ) {
+                $tools = array_merge( $tools, StifliFlexMcp_Search_Image::getTools() );
+            }
+
             // Merge WooCommerce tools if available
             // Lazy load modules ensures compatibility with all load orders
             if ( $this->maybeLoadWooCommerceModules() ) {
@@ -1786,6 +1961,18 @@ class StifliFlexMcpModel {
             return $this->maybeLoadTecIntegrationModule();
         }
 
+        if ( 0 === strpos( (string) $tool, 'elementor_' ) ) {
+            return $this->maybeLoadElementorIntegrationModule();
+        }
+
+        if ( $this->isGoogleSearchConsoleTool( $tool ) ) {
+            return $this->maybeLoadGoogleSearchConsoleModule();
+        }
+
+        if ( 'wp_search_image' === (string) $tool ) {
+            return $this->maybeLoadSearchImageModule();
+        }
+
         return false;
     }
 
@@ -1858,6 +2045,7 @@ class StifliFlexMcpModel {
             if (json_last_error() !== JSON_ERROR_NONE) {
                 $schema = array('type' => 'object', 'properties' => (object) array(), 'required' => array());
             }
+            $schema = StifliFlexMcpUtils::normalizeToolInputSchema( $schema );
             
             $tools[] = array(
                 'name' => $row->tool_name,
@@ -2127,6 +2315,16 @@ class StifliFlexMcpModel {
             $map = array_merge( $map, StifliFlexMcp_TheEventsCalendar::getCapabilities() );
         }
 
+        if ( $this->maybeLoadElementorIntegrationModule() && class_exists( 'StifliFlexMcp_Elementor' ) ) {
+            $map = array_merge( $map, StifliFlexMcp_Elementor::getCapabilities() );
+        }
+
+        if ( $this->maybeLoadSearchImageModule() && class_exists( 'StifliFlexMcp_Search_Image' ) ) {
+            $map = array_merge( $map, StifliFlexMcp_Search_Image::getCapabilities() );
+        }
+
+        $map = array_merge( $map, $this->getGoogleSearchConsoleCapabilities() );
+
         return isset($map[$tool]) ? $map[$tool] : null;
     }
 
@@ -2294,6 +2492,9 @@ class StifliFlexMcpModel {
         };
         $normalizePostCategories = function($value) {
             $normalized = array();
+            if (is_string($value)) {
+                $value = array_map('trim', explode(',', $value));
+            }
             if (is_numeric($value)) {
                 $value = array($value);
             }
@@ -2311,12 +2512,45 @@ class StifliFlexMcpModel {
             }
             return array_values($normalized);
         };
+        $normalizeMetaInput = function($metaInput) {
+            $normalized = array();
+            if (is_object($metaInput)) {
+                $metaInput = (array) $metaInput;
+            }
+            if (empty($metaInput) || !is_array($metaInput)) {
+                return $normalized;
+            }
+            foreach ($metaInput as $metaKey => $metaValue) {
+                if (is_int($metaKey)) {
+                    continue;
+                }
+                $cleanKey = sanitize_key((string) $metaKey);
+                if ('' === $cleanKey) {
+                    continue;
+                }
+                if (is_scalar($metaValue) || null === $metaValue) {
+                    $normalized[$cleanKey] = sanitize_text_field((string) $metaValue);
+                    continue;
+                }
+                $encoded = wp_json_encode($metaValue);
+                if (false !== $encoded) {
+                    $normalized[$cleanKey] = $encoded;
+                }
+            }
+            return $normalized;
+        };
         $normalizeTaxInput = function($taxInput) {
             $normalized = array();
+            if (is_object($taxInput)) {
+                $taxInput = (array) $taxInput;
+            }
             if (!is_array($taxInput)) {
                 return $normalized;
             }
             foreach ($taxInput as $taxonomy => $termValues) {
+                if (is_int($taxonomy)) {
+                    continue;
+                }
                 $taxonomyKey = sanitize_key((string) $taxonomy);
                 if ('' === $taxonomyKey || !taxonomy_exists($taxonomyKey)) {
                     continue;
@@ -2352,23 +2586,79 @@ class StifliFlexMcpModel {
             return $normalized;
         };
 
+        $wpCreatePostVerboseTrace = defined('SFLMCP_VERBOSE_TRACE') && true === SFLMCP_VERBOSE_TRACE;
+
+        $traceWpCreatePost = function($stage, array $payload = array()) use ($tool, $id, $wpCreatePostVerboseTrace) {
+            if (!$wpCreatePostVerboseTrace) {
+                return;
+            }
+            if ('wp_create_post' !== $tool) {
+                return;
+            }
+            $encoded = wp_json_encode($payload);
+            if (false === $encoded) {
+                $encoded = '[unserializable]';
+            }
+            if (strlen($encoded) > 3000) {
+                $encoded = substr($encoded, 0, 3000) . '...[truncated]';
+            }
+            stifli_flex_mcp_log('[TRACE wp_create_post] model/' . $stage . ' ' . $encoded);
+        };
+
         $this->maybeLoadOptionalModuleForTool( $tool );
+        $traceWpCreatePost('dispatch/entry', array(
+            'id' => $id,
+            'tool' => $tool,
+            'args' => is_array($args) ? $args : array(),
+        ));
 
         // Validate args against tool schema (basic) before dispatching
         $tools_map = $this->getTools();
         if ( isset( $tools_map[ $tool ] ) && is_array( $tools_map[ $tool ] ) && ! empty( $tools_map[ $tool ]['inputSchema'] ) ) {
             $schema = $tools_map[$tool]['inputSchema'];
             $errMsg = '';
+            $traceWpCreatePost('dispatch/before-schema-validation', array(
+                'schema_present' => true,
+                'arg_keys' => array_keys(is_array($args) ? $args : array()),
+            ));
             if (!$this->validateArgumentsSchema($schema, is_array($args) ? $args : array(), $errMsg)) {
+                $traceWpCreatePost('dispatch/schema-validation-failed', array('error' => $errMsg));
                 $r['error'] = array('code' => -42602, 'message' => 'Invalid arguments: ' . $errMsg);
                 return $r;
             }
+            $traceWpCreatePost('dispatch/schema-validation-ok', array());
         }
         // --- INICIO LÓGICA DE DISPATCH ADAPTADA ---
         // Enforce capability mapping for mutating tools (centralized)
         $required_cap = $this->getToolCapability($tool);
         if (!empty($required_cap) && !current_user_can($required_cap)) {
-            return array('jsonrpc' => '2.0', 'id' => $id, 'error' => array('code' => 'permission_denied', 'message' => 'Insufficient permissions to execute ' . $tool . '. Required capability: ' . $required_cap));
+            $traceWpCreatePost('dispatch/capability-denied', array(
+                'required_capability' => $required_cap,
+                'current_user_id' => get_current_user_id(),
+            ));
+            return array(
+                'jsonrpc' => '2.0',
+                'id' => $id,
+                'error' => array(
+                    'code' => -32603,
+                    'message' => 'Insufficient permissions to execute ' . $tool . '. Required capability: ' . $required_cap,
+                    'data' => array(
+                        'reason' => 'permission_denied',
+                        'required_capability' => $required_cap,
+                    ),
+                ),
+            );
+        }
+
+        if ( $this->isGoogleSearchConsoleTool( $tool ) && ! $this->isGoogleSearchConsoleRuntimeEnabled() ) {
+            return array(
+                'jsonrpc' => '2.0',
+                'id' => $id,
+                'error' => array(
+                    'code' => -32603,
+                    'message' => 'Google Search Console tools are disabled or not connected. Enable Search Console tools and connect Google OAuth in StifLi Flex MCP > SEO.',
+                ),
+            );
         }
 
         $allowed_by_integration = apply_filters('sflmcp_is_tool_enabled_for_integrations', true, $tool, 'call', null);
@@ -2393,6 +2683,16 @@ class StifliFlexMcpModel {
         // Helper closure to record a tracked change before any early return
         $recordChangeIfNeeded = function() use ( $tool, $args, &$changeSnapshot, &$r ) {
             if ( null !== $changeSnapshot && ! isset( $r['error'] ) && class_exists( 'StifliFlexMcp_ChangeTracker' ) ) {
+                if ( isset( $r['result']['structuredContent']['_skip_change_tracking'] ) ) {
+                    unset( $r['result']['structuredContent']['_skip_change_tracking'] );
+                    $r['result']['content'] = array(
+                        array(
+                            'type' => 'text',
+                            'text' => wp_json_encode( $r['result']['structuredContent'], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ),
+                        ),
+                    );
+                    return;
+                }
                 try {
                     $tracker = StifliFlexMcp_ChangeTracker::getInstance();
                     $change_id = $tracker->recordChange( $tool, is_array( $args ) ? $args : array(), $changeSnapshot, $r );
@@ -2417,6 +2717,13 @@ class StifliFlexMcpModel {
         };
 
         switch ($tool) {
+            case 'wp_search_image':
+                if ( $this->maybeLoadSearchImageModule() && class_exists( 'StifliFlexMcp_Search_Image' ) ) {
+                    return StifliFlexMcp_Search_Image::dispatch( $tool, $args, $id );
+                }
+                $r['error'] = array('code' => -32603, 'message' => 'Search Image tool is disabled. Enable wp_search_image in Multimedia > Search Image.');
+                return $r;
+
             case 'mcp_ping':
                 $diagnosticsEnabled = $isTruthy($utils::getArrayValue($args, 'diagnostics', false));
                 $timeoutSec = max(1, min(10, intval($utils::getArrayValue($args, 'timeout_sec', 3, 1))));
@@ -2579,35 +2886,71 @@ class StifliFlexMcpModel {
                 $addResultText($r, wp_json_encode($out, JSON_PRETTY_PRINT));
                 break;
             case 'wp_create_post':
-                if (empty($args['post_title'])) {
+                $traceWpCreatePost('tool/entered', array(
+                    'current_user_id' => get_current_user_id(),
+                    'args' => $args,
+                ));
+                if ($wpCreatePostVerboseTrace) {
+                    stifli_flex_mcp_log('[MCP wp_create_post] Raw args: ' . wp_json_encode($args));
+                }
+
+                $cp_warnings = array();
+                $cp_current_author = get_current_user_id();
+
+                $cp_title = isset($args['post_title']) && (is_scalar($args['post_title']) || null === $args['post_title'])
+                    ? sanitize_text_field(wp_unslash((string) $args['post_title']))
+                    : '';
+                if ('' === $cp_title) {
+                    $traceWpCreatePost('tool/error-missing-title', array());
                     $r['error'] = array('code' => -42602, 'message' => 'post_title required');
                     break;
                 }
                 $cp_post_type = sanitize_key($utils::getArrayValue($args, 'post_type', 'post'));
                 if (!post_type_exists($cp_post_type)) {
+                    $traceWpCreatePost('tool/error-unknown-post-type', array('post_type' => $cp_post_type));
                     $r['error'] = array('code' => -42600, 'message' => 'Unknown post_type: ' . $cp_post_type);
                     break;
                 }
                 $cp_pt_obj = get_post_type_object($cp_post_type);
                 if ($cp_pt_obj && empty($cp_pt_obj->public) && empty($cp_pt_obj->show_ui)) {
+                    $traceWpCreatePost('tool/error-post-type-hidden', array('post_type' => $cp_post_type));
                     $r['error'] = array('code' => -42600, 'message' => 'post_type "' . $cp_post_type . '" is not exposed via UI/public.');
                     break;
                 }
                 $cp_create_cap = ($cp_pt_obj && !empty($cp_pt_obj->cap->edit_posts)) ? $cp_pt_obj->cap->edit_posts : 'edit_posts';
                 if (!current_user_can($cp_create_cap)) {
-                    $r['error'] = array('code' => 'permission_denied', 'message' => 'Insufficient permissions to create ' . $cp_post_type);
+                    $traceWpCreatePost('tool/error-create-capability', array(
+                        'required_capability' => $cp_create_cap,
+                        'current_user_id' => get_current_user_id(),
+                    ));
+                    $r['error'] = array(
+                        'code' => -32603,
+                        'message' => 'Insufficient permissions to create ' . $cp_post_type,
+                        'data' => array(
+                            'reason' => 'permission_denied',
+                            'required_capability' => $cp_create_cap,
+                        ),
+                    );
                     break;
                 }
+                $cp_post_status = sanitize_key($utils::getArrayValue($args, 'post_status', 'draft'));
+                if (!in_array($cp_post_status, array('draft', 'publish', 'pending', 'private', 'future'), true)) {
+                    $cp_post_status = 'draft';
+                }
                 $ins = array(
-                    'post_title' => sanitize_text_field($args['post_title']),
-                    'post_status' => sanitize_key($utils::getArrayValue($args, 'post_status', 'draft')),
+                    'post_title' => $cp_title,
+                    'post_status' => $cp_post_status,
                     'post_type' => $cp_post_type,
                 );
-                if (!empty($args['post_content'])) {
-                    $ins['post_content'] = $args['post_content'];
+                if (array_key_exists('post_content', $args)) {
+                    $ins['post_content'] = is_scalar($args['post_content']) || null === $args['post_content']
+                        ? wp_slash((string) $args['post_content'])
+                        : '';
                 }
-                if (!empty($args['post_excerpt'])) {
-                    $ins['post_excerpt'] = $cleanHtml($args['post_excerpt']);
+                if (array_key_exists('post_excerpt', $args)) {
+                    $ins['post_excerpt'] = is_scalar($args['post_excerpt']) || null === $args['post_excerpt']
+                        ? wp_slash(sanitize_textarea_field(wp_unslash((string) $args['post_excerpt'])))
+                        : '';
                 }
                 if (!empty($args['post_name'])) {
                     $ins['post_name'] = sanitize_title($args['post_name']);
@@ -2615,15 +2958,44 @@ class StifliFlexMcpModel {
                 if (isset($args['post_author'])) {
                     $cp_author_id = intval($args['post_author']);
                     if ($cp_author_id <= 0 || !get_userdata($cp_author_id)) {
-                        $r['error'] = array('code' => -42600, 'message' => 'post_author user not found.');
-                        break;
+                        $traceWpCreatePost('tool/post-author-invalid', array('post_author' => $cp_author_id));
+                        if ($cp_current_author > 0) {
+                            $ins['post_author'] = $cp_current_author;
+                            $cp_warnings[] = 'post_author ignored because user was not found; using current authenticated user.';
+                        } else {
+                            $r['error'] = array('code' => -42600, 'message' => 'post_author user not found.');
+                            break;
+                        }
+                    } else {
+                        $cp_others_cap = ($cp_pt_obj && !empty($cp_pt_obj->cap->edit_others_posts)) ? $cp_pt_obj->cap->edit_others_posts : 'edit_others_posts';
+                        if ($cp_author_id !== $cp_current_author && !current_user_can($cp_others_cap)) {
+                            $traceWpCreatePost('tool/post-author-capability-denied', array(
+                                'post_author' => $cp_author_id,
+                                'required_capability' => $cp_others_cap,
+                                'current_user_id' => $cp_current_author,
+                            ));
+                            if ($cp_current_author > 0) {
+                                $ins['post_author'] = $cp_current_author;
+                                $cp_warnings[] = 'post_author ignored due insufficient capability; using current authenticated user.';
+                            } else {
+                                $r['error'] = array(
+                                    'code' => -32603,
+                                    'message' => 'Insufficient permissions to assign post_author of ' . $cp_post_type,
+                                    'data' => array(
+                                        'reason' => 'permission_denied',
+                                        'required_capability' => $cp_others_cap,
+                                    ),
+                                );
+                                break;
+                            }
+                        } else {
+                            $ins['post_author'] = $cp_author_id;
+                        }
                     }
-                    $cp_others_cap = ($cp_pt_obj && !empty($cp_pt_obj->cap->edit_others_posts)) ? $cp_pt_obj->cap->edit_others_posts : 'edit_others_posts';
-                    if ($cp_author_id !== get_current_user_id() && !current_user_can($cp_others_cap)) {
-                        $r['error'] = array('code' => 'permission_denied', 'message' => 'Insufficient permissions to assign post_author of ' . $cp_post_type);
-                        break;
+                } else {
+                    if ($cp_current_author > 0) {
+                        $ins['post_author'] = $cp_current_author;
                     }
-                    $ins['post_author'] = $cp_author_id;
                 }
                 $cp_post_categories = array();
                 if (array_key_exists('post_category', $args)) {
@@ -2633,23 +3005,56 @@ class StifliFlexMcpModel {
                     }
                 }
                 $cp_tax_input = array();
-                if (array_key_exists('tax_input', $args) && is_array($args['tax_input'])) {
+                if (array_key_exists('tax_input', $args)) {
                     $cp_tax_input = $normalizeTaxInput($args['tax_input']);
                     if (!empty($cp_tax_input)) {
                         $ins['tax_input'] = $cp_tax_input;
                     }
                 }
-                if (!empty($args['meta_input']) && is_array($args['meta_input'])) {
-                    $ins['meta_input'] = $args['meta_input'];
+                $cp_meta_input = array();
+                if (array_key_exists('meta_input', $args)) {
+                    $cp_meta_input = $normalizeMetaInput($args['meta_input']);
+                    if (!empty($cp_meta_input)) {
+                        $ins['meta_input'] = $cp_meta_input;
+                    }
                 }
+                if ($wpCreatePostVerboseTrace) {
+                    stifli_flex_mcp_log('[MCP wp_create_post] Normalized args: ' . wp_json_encode($ins));
+                }
+                $traceWpCreatePost('tool/before-insert', array('insert_args' => $ins));
+
                 $new = wp_insert_post($ins, true);
+                if ($wpCreatePostVerboseTrace) {
+                    stifli_flex_mcp_log('[MCP wp_create_post] Insert result: ' . (is_wp_error($new) ? $new->get_error_message() : (string) $new));
+                }
+                $traceWpCreatePost('tool/after-insert', array(
+                    'is_wp_error' => is_wp_error($new),
+                    'insert_result' => is_wp_error($new) ? $new->get_error_message() : (string) $new,
+                ));
                 if (is_wp_error($new)) {
-                    $r['error'] = array('code' => $new->get_error_code(), 'message' => $new->get_error_message());
+                    $wp_error_code = $new->get_error_code();
+                    $traceWpCreatePost('tool/error-wp-insert-post', array(
+                        'wp_error_code' => is_scalar($wp_error_code) ? (string) $wp_error_code : 'unknown',
+                        'wp_error_message' => $new->get_error_message(),
+                    ));
+                    $r['error'] = array(
+                        'code' => -32603,
+                        'message' => $new->get_error_message(),
+                        'data' => array(
+                            'reason' => 'wp_insert_post_error',
+                            'wp_error_code' => is_scalar($wp_error_code) ? (string) $wp_error_code : 'unknown',
+                        ),
+                    );
                 } else {
-                    if (empty($ins['meta_input']) && !empty($args['meta_input']) && is_array($args['meta_input'])) {
-                        foreach ($args['meta_input'] as $k => $v) {
-                            update_post_meta($new, sanitize_key($k), maybe_serialize($v));
-                        }
+                    $new = (int) $new;
+                    if ($new <= 0) {
+                        $traceWpCreatePost('tool/error-empty-insert-id', array());
+                        $r['error'] = array(
+                            'code' => -32603,
+                            'message' => 'wp_insert_post returned an empty post ID.',
+                            'data' => array('reason' => 'insert_failed'),
+                        );
+                        break;
                     }
 
                     if (!empty($cp_post_categories)) {
@@ -2671,7 +3076,43 @@ class StifliFlexMcpModel {
                             }
                         }
                     }
-                    $addResultText($r, 'Post created ID ' . $new);
+                    clean_post_cache($new);
+                    $created_post = get_post($new);
+                    $cp_permalink = get_permalink($new);
+                    $cp_edit_url = get_edit_post_link($new, 'raw');
+                    $cp_preview_url = $created_post ? get_preview_post_link($created_post) : '';
+                    $cp_response = array(
+                        'success' => true,
+                        'post_id' => $new,
+                        'ID' => $new,
+                        'post_title' => get_the_title($new),
+                        'post_status' => get_post_status($new),
+                        'post_type' => get_post_type($new),
+                        'post_author' => (int) get_post_field('post_author', $new),
+                        'permalink' => is_string($cp_permalink) ? $cp_permalink : '',
+                        'edit_url' => is_string($cp_edit_url) ? $cp_edit_url : '',
+                        'preview_url' => is_string($cp_preview_url) ? $cp_preview_url : '',
+                        'featured_media' => (int) get_post_thumbnail_id($new),
+                        'message' => 'Post created successfully.',
+                    );
+                    if (!empty($cp_warnings)) {
+                        $cp_response['warnings'] = $cp_warnings;
+                    }
+                    if ($wpCreatePostVerboseTrace) {
+                        stifli_flex_mcp_log('[MCP wp_create_post] Final response: ' . wp_json_encode($cp_response));
+                    }
+                    $traceWpCreatePost('tool/success-response', array('response' => $cp_response));
+
+                    $cp_response_text = wp_json_encode($cp_response, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+                    if (false === $cp_response_text) {
+                        $cp_response_text = 'Post created successfully. ID: ' . $new;
+                    }
+                    $r['result'] = array(
+                        'content' => array(
+                            array('type' => 'text', 'text' => $cp_response_text),
+                        ),
+                        'structuredContent' => $cp_response,
+                    );
                 }
                 break;
             case 'wp_update_post':
@@ -2737,7 +3178,7 @@ class StifliFlexMcpModel {
                             }
                             continue;
                         }
-                        $c[$k] = in_array($k, array('post_content', 'post_excerpt'), true) ? $cleanHtml($v) : sanitize_text_field($v);
+                        $c[$k] = in_array($k, array('post_content', 'post_excerpt'), true) ? wp_slash((string) $v) : sanitize_text_field($v);
                     }
                 }
 
@@ -2866,9 +3307,9 @@ class StifliFlexMcpModel {
             case 'wp_create_page':
                 $pdata = array(
                     'post_type' => 'page',
-                    'post_title' => $cleanHtml($utils::getArrayValue($args, 'post_title', '')),
-                    'post_content' => $cleanHtml($utils::getArrayValue($args, 'post_content', '')),
-                    'post_status' => $utils::getArrayValue($args, 'post_status', 'draft'),
+                    'post_title' => sanitize_text_field($utils::getArrayValue($args, 'post_title', '')),
+                    'post_content' => wp_slash((string) $utils::getArrayValue($args, 'post_content', '')),
+                    'post_status' => sanitize_key($utils::getArrayValue($args, 'post_status', 'draft')),
                 );
                 if (!empty($args['post_author'])) {
                     $pdata['post_author'] = intval($args['post_author']);
@@ -2897,7 +3338,15 @@ class StifliFlexMcpModel {
                 $pdata = array('ID' => intval($args['ID']), 'post_type' => 'page');
                 foreach (array('post_title', 'post_content', 'post_status', 'post_author', 'post_parent', 'menu_order') as $k) {
                     if (isset($args[$k])) {
-                        $pdata[$k] = in_array($k, array('post_title', 'post_content'), true) ? $cleanHtml($args[$k]) : $args[$k];
+                        if ('post_content' === $k) {
+                            $pdata[$k] = wp_slash((string) $args[$k]);
+                        } elseif ('post_title' === $k) {
+                            $pdata[$k] = sanitize_text_field($args[$k]);
+                        } elseif ('post_status' === $k) {
+                            $pdata[$k] = sanitize_key($args[$k]);
+                        } else {
+                            $pdata[$k] = intval($args[$k]);
+                        }
                     }
                 }
                 $u = wp_update_post($pdata, true);
@@ -6280,6 +6729,46 @@ class StifliFlexMcpModel {
 
                     if ( class_exists( 'StifliFlexMcp_TheEventsCalendar' ) ) {
                         $result = StifliFlexMcp_TheEventsCalendar::dispatch( $tool, $args, $r, $addResultText, $utils );
+                        if ( $result !== null ) {
+                            $recordChangeIfNeeded();
+                            return $r;
+                        }
+                    }
+                }
+
+                // Try Elementor module (elementor_* tools)
+                if ( strpos( $tool, 'elementor_' ) === 0 ) {
+                    if ( ! $this->maybeLoadElementorIntegrationModule() ) {
+                        $r['error'] = array(
+                            'code' => -32603,
+                            'message' => $this->isElementorRuntimeAvailable()
+                                ? 'Elementor integration module is not available.'
+                                : 'Elementor plugin is not active.',
+                        );
+                        return $r;
+                    }
+
+                    if ( class_exists( 'StifliFlexMcp_Elementor' ) ) {
+                        $result = StifliFlexMcp_Elementor::dispatch( $tool, $args, $r, $addResultText, $utils );
+                        if ( $result !== null ) {
+                            $recordChangeIfNeeded();
+                            return $r;
+                        }
+                    }
+                }
+
+                // Try Google Search Console module (wp_gsc_* and wp_seo_find_gsc_opportunities)
+                if ( $this->isGoogleSearchConsoleTool( $tool ) ) {
+                    if ( ! $this->maybeLoadGoogleSearchConsoleModule() ) {
+                        $r['error'] = array(
+                            'code' => -32603,
+                            'message' => 'Google Search Console module is not available.',
+                        );
+                        return $r;
+                    }
+
+                    if ( class_exists( 'StifliFlexMcp_GoogleSearchConsole' ) ) {
+                        $result = StifliFlexMcp_GoogleSearchConsole::dispatch( $tool, $args, $r, $addResultText, $utils );
                         if ( $result !== null ) {
                             $recordChangeIfNeeded();
                             return $r;
