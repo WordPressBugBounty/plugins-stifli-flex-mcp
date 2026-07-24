@@ -225,7 +225,7 @@ class StifliFlexMcpModel {
             'wp_update_option',
             'wp_css_set_global',
             'wp_css_set_scoped',
-            'wp_update_post_meta','wp_delete_post_meta',
+            'wp_add_post_meta','wp_update_post_meta','wp_delete_post_meta',
             'wp_create_term','wp_delete_term',
             'wp_update_term',
             'wp_update_term_meta','wp_delete_term_meta',
@@ -297,6 +297,8 @@ class StifliFlexMcpModel {
             // WordPress - Additional sensitive reads
             'wp_get_user_meta',     // user privacy data
             'wp_get_site_health',   // system information
+            'wp_get_cron_schedule', // scheduled tasks visibility
+            'wp_get_error_log_tail', // debug log inspection
             'wp_get_term_meta',     // may include private/encoded data
             // WooCommerce sensitive reads (wc_get_customers removed for WordPress.org compliance)
             'wc_get_orders',        // order data privacy
@@ -475,13 +477,14 @@ class StifliFlexMcpModel {
                 // Posts (mutación)
                 'wp_create_post' => array(
                     'name' => 'wp_create_post',
-                    'description' => 'Create a post. Requires post_title. Optional: post_content, post_status, post_type, post_excerpt, post_author, featured_media, meta_input, post_category, tax_input.',
+                    'description' => 'Create a post. Requires post_title. Optional: post_content, post_status (publish, draft, future, pending, private), date (ISO 8601 in site timezone), post_type, post_excerpt, post_author, featured_media, meta_input, post_category, tax_input.',
                     'inputSchema' => array(
                         'type' => 'object',
                         'properties' => array(
                             'post_title'   => array('type' => 'string', 'description' => 'Post title.'),
                             'post_content' => array('type' => 'string', 'description' => 'Post content, HTML or Gutenberg blocks.'),
-                            'post_status'  => array('type' => 'string', 'description' => 'Post status: draft, publish, pending, private, future.', 'default' => 'draft'),
+                            'post_status'  => array('type' => 'string', 'enum' => array('publish', 'draft', 'future', 'pending', 'private'), 'description' => 'Post status. Use future with date to schedule.', 'default' => 'draft'),
+                            'date'         => array('type' => 'string', 'description' => 'Optional ISO 8601 local site date/time. With status=future schedules the post; with past dates WordPress publishes immediately.'),
                             'post_type'    => array('type' => 'string', 'description' => 'Post type.', 'default' => 'post'),
                             'post_excerpt' => array('type' => 'string', 'description' => 'Post excerpt.'),
                             'post_author'  => array('type' => 'integer', 'description' => 'Author user ID.'),
@@ -497,7 +500,7 @@ class StifliFlexMcpModel {
                 ),
                 'wp_update_post' => array(
                     'name' => 'wp_update_post',
-                    'description' => 'Update a post by ID, id, or post_id. The "fields" object should use the standard parameters accepted by the WordPress wp_update_post() function. Empty text fields preserve existing values. Supports taxonomy updates with fields.post_category / fields.tax_input (or top-level post_category / tax_input). Optional top-level featured_media (attachment ID) sets the featured image.',
+                    'description' => 'Update a post by ID, id, or post_id. The "fields" object should use the standard parameters accepted by the WordPress wp_update_post() function. Empty text fields preserve existing values. Supports date (ISO 8601) for scheduling/backdating, taxonomy updates with fields.post_category / fields.tax_input (or top-level post_category / tax_input), and optional top-level featured_media.',
                     'inputSchema' => array(
                         'type' => 'object',
                         'properties' => array(
@@ -508,6 +511,7 @@ class StifliFlexMcpModel {
                             'post_category'=> array('type' => 'array', 'items' => array('type' => 'integer')),
                             'tax_input'    => array('type' => 'object'),
                             'meta_input' => array('type' => 'object'),
+                            'date' => array('type' => 'string', 'description' => 'Optional ISO 8601 local site date/time. Sets post_date/post_date_gmt with edit_date=true.'),
                             'featured_media' => array('type' => 'integer', 'description' => 'Attachment ID to set as featured image.'),
                         ),
                         'required' => array(),
@@ -718,11 +722,17 @@ class StifliFlexMcpModel {
                 ),
                 'wp_get_terms' => array(
                     'name' => 'wp_get_terms',
-                    'description' => 'List terms for a taxonomy (taxonomy required).',
+                    'description' => 'List terms for a taxonomy with optional search, parent, hide_empty, and pagination filters.',
                     'inputSchema' => array(
                         'type' => 'object',
                         'properties' => array(
                             'taxonomy' => array('type' => 'string'),
+                            'search' => array('type' => 'string'),
+                            'hide_empty' => array('type' => 'boolean'),
+                            'parent' => array('type' => 'integer'),
+                            'page' => array('type' => 'integer'),
+                            'per_page' => array('type' => 'integer'),
+                            'include_pagination' => array('type' => 'boolean'),
                         ),
                         'required' => array('taxonomy'),
                     ),
@@ -1016,7 +1026,7 @@ class StifliFlexMcpModel {
                 ),
                 'wp_update_post_meta' => array(
                     'name' => 'wp_update_post_meta',
-                    'description' => 'Update post meta (post_id/ID/id, meta_key, meta_value).',
+                    'description' => 'Update post meta (post_id/ID/id, meta_key, meta_value). meta_value accepts JSON scalar, array, or object values.',
                     'inputSchema' => array(
                         'type' => 'object',
                         'properties' => array(
@@ -1024,7 +1034,23 @@ class StifliFlexMcpModel {
                             'ID'         => array('type' => 'integer'),
                             'id'         => array('type' => 'integer'),
                             'meta_key'   => array('type' => 'string'),
-                            'meta_value' => array('type' => 'string'),
+                            'meta_value' => array('type' => array('string', 'number', 'integer', 'boolean', 'array', 'object', 'null'), 'description' => 'JSON scalar, array, or object value. PHP-serialized strings are rejected.'),
+                        ),
+                        'required' => array('meta_key','meta_value'),
+                    ),
+                ),
+                'wp_add_post_meta' => array(
+                    'name' => 'wp_add_post_meta',
+                    'description' => 'Add a post meta row without overwriting existing rows. Optional unique=true prevents duplicates for the same key.',
+                    'inputSchema' => array(
+                        'type' => 'object',
+                        'properties' => array(
+                            'post_id'    => array('type' => 'integer'),
+                            'ID'         => array('type' => 'integer'),
+                            'id'         => array('type' => 'integer'),
+                            'meta_key'   => array('type' => 'string'),
+                            'meta_value' => array('type' => array('string', 'number', 'integer', 'boolean', 'array', 'object', 'null'), 'description' => 'JSON scalar, array, or object value. PHP-serialized strings are rejected.'),
+                            'unique'     => array('type' => 'boolean'),
                         ),
                         'required' => array('meta_key','meta_value'),
                     ),
@@ -1048,12 +1074,13 @@ class StifliFlexMcpModel {
                 // Búsqueda y red
                 'search' => array(
                     'name' => 'search',
-                    'description' => 'Search posts with optional post type, author, category, tag, status, date, and sort filters plus paging and pagination metadata (q or query param).',
+                    'description' => 'Search posts with optional post type, author, category, tag, status, date, sorting, snippets, and pagination metadata (q or query param).',
                     'inputSchema' => array(
                         'type' => 'object',
                         'properties' => array(
                             'q'     => array('type' => 'string'),
                             'limit' => array('type' => 'integer'),
+                            'per_page' => array('type' => 'integer', 'description' => 'Alias for limit. Maximum 100.'),
                             'offset' => array('type' => 'integer'),
                             'paged' => array('type' => 'integer'),
                             'post_type' => array('type' => 'string'),
@@ -1065,6 +1092,7 @@ class StifliFlexMcpModel {
                             'order' => array('type' => 'string'),
                             'after' => array('type' => 'string'),
                             'before' => array('type' => 'string'),
+                            'snippet' => array('type' => 'integer', 'description' => 'Optional matched content snippet length in characters. Maximum 1000.'),
                             'include_pagination' => array('type' => 'boolean'),
                         ),
                         'required' => array(),
@@ -1395,13 +1423,14 @@ class StifliFlexMcpModel {
                 ),
                 'wp_create_page' => array(
                     'name' => 'wp_create_page',
-                    'description' => 'Create a new page (post_title, post_content, post_status, post_author, post_parent, menu_order, meta_input).',
+                    'description' => 'Create a new page (post_title, post_content, post_status, date, post_author, post_parent, menu_order, meta_input). Supports publish, draft, future, pending, and private statuses.',
                     'inputSchema' => array(
                         'type' => 'object',
                         'properties' => array(
                             'post_title'   => array('type' => 'string'),
                             'post_content' => array('type' => 'string'),
-                            'post_status'  => array('type' => 'string'),
+                            'post_status'  => array('type' => 'string', 'enum' => array('publish', 'draft', 'future', 'pending', 'private')),
+                            'date'         => array('type' => 'string', 'description' => 'Optional ISO 8601 local site date/time. With status=future schedules the page.'),
                             'post_author'  => array('type' => 'integer'),
                             'post_parent'  => array('type' => 'integer'),
                             'menu_order'   => array('type' => 'integer'),
@@ -1412,7 +1441,7 @@ class StifliFlexMcpModel {
                 ),
                 'wp_update_page' => array(
                     'name' => 'wp_update_page',
-                    'description' => 'Update a page by ID, id, or post_id (post_title, post_content, post_status, post_author, post_parent, menu_order, meta_input). Empty text fields preserve existing values.',
+                    'description' => 'Update a page by ID, id, or post_id (post_title, post_content, post_status, date, post_author, post_parent, menu_order, meta_input). Empty text fields preserve existing values. Date uses ISO 8601 and sets edit_date=true.',
                     'inputSchema' => array(
                         'type' => 'object',
                         'properties' => array(
@@ -1421,7 +1450,8 @@ class StifliFlexMcpModel {
                             'post_id'      => array('type' => 'integer'),
                             'post_title'   => array('type' => 'string'),
                             'post_content' => array('type' => 'string'),
-                            'post_status'  => array('type' => 'string'),
+                            'post_status'  => array('type' => 'string', 'enum' => array('publish', 'draft', 'future', 'pending', 'private')),
+                            'date'         => array('type' => 'string', 'description' => 'Optional ISO 8601 local site date/time. Sets post_date/post_date_gmt with edit_date=true.'),
                             'post_author'  => array('type' => 'integer'),
                             'post_parent'  => array('type' => 'integer'),
                             'menu_order'   => array('type' => 'integer'),
@@ -1724,6 +1754,59 @@ class StifliFlexMcpModel {
                                 'description' => 'Audit depth. 0 = basic and fast. 1 = medium with all direct Site Health checks. 2 = deep with async Site Health checks and directory sizes. Default: 0.',
                                 'minimum' => 0,
                                 'maximum' => 2,
+                            ),
+                        ),
+                        'required' => array(),
+                    ),
+                ),
+                'wp_get_cron_schedule' => array(
+                    'name' => 'wp_get_cron_schedule',
+                    'description' => 'List scheduled WP-Cron events with next-run time and overdue flags. Supports filtering by hook and optional argument details.',
+                    'inputSchema' => array(
+                        'type' => 'object',
+                        'properties' => array(
+                            'hook' => array(
+                                'type' => 'string',
+                                'description' => 'Optional hook filter. Matches exact hook name or substring.',
+                            ),
+                            'overdue_only' => array(
+                                'type' => 'boolean',
+                                'description' => 'When true, return only overdue events.',
+                            ),
+                            'include_args' => array(
+                                'type' => 'boolean',
+                                'description' => 'When true, include event arguments (secret-redacted). Default false.',
+                            ),
+                            'limit' => array(
+                                'type' => 'integer',
+                                'description' => 'Maximum events to return (1-1000). Default 250.',
+                                'minimum' => 1,
+                                'maximum' => 1000,
+                            ),
+                        ),
+                        'required' => array(),
+                    ),
+                ),
+                'wp_get_error_log_tail' => array(
+                    'name' => 'wp_get_error_log_tail',
+                    'description' => 'Return recent lines from debug logs with optional keyword filtering. Supports wp_debug and plugin log sources.',
+                    'inputSchema' => array(
+                        'type' => 'object',
+                        'properties' => array(
+                            'source' => array(
+                                'type' => 'string',
+                                'description' => 'Log source: wp_debug (default) or plugin.',
+                                'enum' => array( 'wp_debug', 'plugin' ),
+                            ),
+                            'lines' => array(
+                                'type' => 'integer',
+                                'description' => 'Number of trailing lines to inspect (1-500). Default 120.',
+                                'minimum' => 1,
+                                'maximum' => 500,
+                            ),
+                            'keyword' => array(
+                                'type' => 'string',
+                                'description' => 'Optional keyword filter (case-insensitive) applied after tail extraction.',
                             ),
                         ),
                         'required' => array(),
@@ -2043,33 +2126,70 @@ class StifliFlexMcpModel {
         // required
         if (!empty($schema['required']) && is_array($schema['required'])) {
             foreach ($schema['required'] as $rk) {
-                if (!isset($args[$rk])) {
+                if (!array_key_exists($rk, $args)) {
                     $err = 'Missing required parameter: ' . $rk;
                     return false;
                 }
             }
         }
         // tipos básicos
+        $matchesType = function($value, $type) {
+            switch ($type) {
+                case 'string':
+                    return is_string($value);
+                case 'integer':
+                    return is_int($value) || (is_string($value) && ctype_digit($value));
+                case 'number':
+                    return is_int($value) || is_float($value) || (is_string($value) && is_numeric($value));
+                case 'boolean':
+                    return is_bool($value) || in_array($value, array(true,false,0,1,'0','1'), true);
+                case 'object':
+                    return is_array($value) || is_object($value);
+                case 'array':
+                    return is_array($value);
+                case 'null':
+                    return null === $value;
+                default:
+                    return true;
+            }
+        };
         foreach ($props as $k => $p) {
-            if (!isset($args[$k])) continue;
+            if (!array_key_exists($k, $args)) continue;
             $val = $args[$k];
             if (!isset($p['type'])) continue;
             $type = $p['type'];
+            if (is_array($type)) {
+                $matchesAnyType = false;
+                foreach ($type as $candidateType) {
+                    if ($matchesType($val, $candidateType)) {
+                        $matchesAnyType = true;
+                        break;
+                    }
+                }
+                if (!$matchesAnyType) { $err = "Parameter $k has an invalid type"; return false; }
+                continue;
+            }
             switch ($type) {
                 case 'string':
-                    if (!is_string($val)) { $err = "Parameter $k must be a string"; return false; }
+                    if (!$matchesType($val, 'string')) { $err = "Parameter $k must be a string"; return false; }
                     break;
                 case 'integer':
-                    if (!is_int($val) && !(is_string($val) && ctype_digit($val))) { $err = "Parameter $k must be an integer"; return false; }
+                    if (!$matchesType($val, 'integer')) { $err = "Parameter $k must be an integer"; return false; }
+                    break;
+                case 'number':
+                    if (!$matchesType($val, 'number')) { $err = "Parameter $k must be a number"; return false; }
                     break;
                 case 'boolean':
-                    if (!is_bool($val) && !in_array($val, array(true,false,0,1,'0','1'), true)) { $err = "Parameter $k must be boolean"; return false; }
+                    if (!$matchesType($val, 'boolean')) { $err = "Parameter $k must be boolean"; return false; }
                     break;
                 case 'object':
-                    if (!is_array($val) && !is_object($val)) { $err = "Parameter $k must be an object"; return false; }
+                    if (!$matchesType($val, 'object')) { $err = "Parameter $k must be an object"; return false; }
                     break;
                 case 'array':
-                    if (!is_array($val)) { $err = "Parameter $k must be an array"; return false; }
+                    if (!$matchesType($val, 'array')) { $err = "Parameter $k must be an array"; return false; }
+                    break;
+                case 'null':
+                    if (!$matchesType($val, 'null')) { $err = "Parameter $k must be null"; return false; }
                     break;
                 default:
                     break;
@@ -2109,6 +2229,8 @@ class StifliFlexMcpModel {
             'wp_restore_post_revision' => 'edit_posts',
             // site health
             'wp_get_site_health' => 'manage_options',
+            'wp_get_cron_schedule' => 'manage_options',
+            'wp_get_error_log_tail' => 'manage_options',
             // categories
             'wp_create_category' => 'manage_categories',
             'wp_update_category' => 'manage_categories',
@@ -2135,6 +2257,7 @@ class StifliFlexMcpModel {
             'wp_css_set_global' => 'edit_theme_options',
             'wp_css_set_scoped' => 'manage_options',
             'wp_get_plugin_settings' => 'manage_options',
+            'wp_add_post_meta' => 'manage_options',
             'wp_update_post_meta' => 'manage_options',
             'wp_delete_post_meta' => 'manage_options',
             'wp_get_settings' => 'manage_options',
@@ -2240,6 +2363,46 @@ class StifliFlexMcpModel {
         $postExcerpt = function($p) {
             return wp_trim_words( wp_strip_all_tags( isset($p->post_excerpt) && !empty($p->post_excerpt) ? $p->post_excerpt : $p->post_content ), 55 );
         };
+        $buildSearchSnippet = function($content, $term, $length) {
+            $length = max(0, min(1000, (int) $length));
+            if ($length <= 0) {
+                return '';
+            }
+            $plain = strip_shortcodes((string) $content);
+            $plain = wp_strip_all_tags($plain);
+            $plain = trim(preg_replace('/\s+/u', ' ', $plain));
+            if ('' === $plain) {
+                return '';
+            }
+
+            $term = trim((string) $term);
+            $plain_len = function_exists('mb_strlen') ? mb_strlen($plain) : strlen($plain);
+            if ($plain_len <= $length) {
+                return $plain;
+            }
+
+            $pos = false;
+            if ('' !== $term) {
+                $pos = function_exists('mb_stripos') ? mb_stripos($plain, $term) : stripos($plain, $term);
+            }
+
+            if (false === $pos) {
+                $start = 0;
+            } else {
+                $term_len = function_exists('mb_strlen') ? mb_strlen($term) : strlen($term);
+                $start = max(0, (int) $pos - (int) floor(max(0, $length - $term_len) / 2));
+            }
+
+            $snippet = function_exists('mb_substr') ? mb_substr($plain, $start, $length) : substr($plain, $start, $length);
+            if ($start > 0) {
+                $snippet = '...' . ltrim($snippet);
+            }
+            $end = $start + $length;
+            if ($end < $plain_len) {
+                $snippet = rtrim($snippet) . '...';
+            }
+            return $snippet;
+        };
         $isTruthy = function($value) {
             if (is_bool($value)) {
                 return $value;
@@ -2283,6 +2446,93 @@ class StifliFlexMcpModel {
                 return '' === $slug ? null : $slug;
             }
             return null;
+        };
+        $applyPostDate = function(array &$data, array $source, &$errorMessage = null, $isUpdate = false) {
+            $date_value = null;
+            foreach (array('date', 'post_date') as $date_key) {
+                if (array_key_exists($date_key, $source) && is_scalar($source[$date_key]) && '' !== trim((string) $source[$date_key])) {
+                    $date_value = trim((string) $source[$date_key]);
+                    break;
+                }
+            }
+            if (null === $date_value) {
+                return true;
+            }
+
+            try {
+                $site_timezone = function_exists('wp_timezone') ? wp_timezone() : new DateTimeZone(wp_timezone_string() ?: 'UTC');
+                $has_timezone = (bool) preg_match('/(?:Z|[+-]\d{2}:?\d{2})$/', $date_value);
+                $datetime = $has_timezone ? new DateTimeImmutable($date_value) : new DateTimeImmutable($date_value, $site_timezone);
+                $local_datetime = $datetime->setTimezone($site_timezone);
+                $gmt_datetime = $datetime->setTimezone(new DateTimeZone('UTC'));
+                $data['post_date'] = $local_datetime->format('Y-m-d H:i:s');
+                $data['post_date_gmt'] = $gmt_datetime->format('Y-m-d H:i:s');
+                if ($isUpdate) {
+                    $data['edit_date'] = true;
+                }
+                return true;
+            } catch (Exception $e) {
+                $errorMessage = 'Invalid date. Use ISO 8601 format, for example 2026-07-20T10:30:00.';
+                return false;
+            }
+        };
+        $looksSerializedMetaString = function($value) {
+            if (!is_string($value)) {
+                return false;
+            }
+            $trimmed = trim($value);
+            if ('' === $trimmed) {
+                return false;
+            }
+            if (function_exists('is_serialized') && is_serialized($trimmed)) {
+                return true;
+            }
+            return (bool) preg_match('/^(?:a|O|C|s|i|d|b):\d+[:;]/s', $trimmed)
+                || 'N;' === $trimmed;
+        };
+        $normalizePostMetaValue = function($value, &$errorMessage = null) use (&$normalizePostMetaValue, $looksSerializedMetaString) {
+            if (is_string($value)) {
+                if ($looksSerializedMetaString($value)) {
+                    $errorMessage = 'Serialized PHP strings are not accepted for meta_value. Pass structured JSON instead.';
+                    return null;
+                }
+                return $value;
+            }
+            if (is_null($value) || is_bool($value) || is_int($value) || is_float($value)) {
+                return $value;
+            }
+            if (is_object($value)) {
+                $value = get_object_vars($value);
+            }
+            if (is_array($value)) {
+                $normalized = array();
+                foreach ($value as $meta_key => $meta_value) {
+                    $child_error = null;
+                    $normalized[$meta_key] = $normalizePostMetaValue($meta_value, $child_error);
+                    if (null !== $child_error) {
+                        $errorMessage = $child_error;
+                        return null;
+                    }
+                }
+                return $normalized;
+            }
+            $errorMessage = 'meta_value must be a JSON scalar, array, object, or null.';
+            return null;
+        };
+        $toolCalledEmitted = false;
+        $emitToolCalled = function(array $response) use ($tool, &$toolCalledEmitted) {
+            if ($toolCalledEmitted) {
+                return $response;
+            }
+            $toolCalledEmitted = true;
+            $status = isset($response['error']) ? 'error' : 'success';
+            $error_message = '';
+            if (isset($response['error']['message']) && is_scalar($response['error']['message'])) {
+                $error_message = (string) $response['error']['message'];
+            }
+            do_action('stifli_flex_mcp_tool_called', $tool, $status, $error_message);
+            do_action('sflmcp_tool_called', $tool, $status, $error_message);
+            return $response;
         };
         $lintCss = function($css) {
             $css = is_string($css) ? $css : '';
@@ -2608,7 +2858,7 @@ class StifliFlexMcpModel {
             if (!$this->validateArgumentsSchema($schema, is_array($args) ? $args : array(), $errMsg)) {
                 $traceWpCreatePost('dispatch/schema-validation-failed', array('error' => $errMsg));
                 $r['error'] = array('code' => -42602, 'message' => 'Invalid arguments: ' . $errMsg);
-                return $r;
+                return $emitToolCalled($r);
             }
             $traceWpCreatePost('dispatch/schema-validation-ok', array());
         }
@@ -2620,41 +2870,32 @@ class StifliFlexMcpModel {
                 'required_capability' => $required_cap,
                 'current_user_id' => get_current_user_id(),
             ));
-            return array(
-                'jsonrpc' => '2.0',
-                'id' => $id,
-                'error' => array(
-                    'code' => -32603,
-                    'message' => 'Insufficient permissions to execute ' . $tool . '. Required capability: ' . $required_cap,
-                    'data' => array(
-                        'reason' => 'permission_denied',
-                        'required_capability' => $required_cap,
-                    ),
+            $r['error'] = array(
+                'code' => -32603,
+                'message' => 'Insufficient permissions to execute ' . $tool . '. Required capability: ' . $required_cap,
+                'data' => array(
+                    'reason' => 'permission_denied',
+                    'required_capability' => $required_cap,
                 ),
             );
+            return $emitToolCalled($r);
         }
 
         if ( $this->isGoogleSearchConsoleTool( $tool ) && ! $this->isGoogleSearchConsoleRuntimeEnabled() ) {
-            return array(
-                'jsonrpc' => '2.0',
-                'id' => $id,
-                'error' => array(
-                    'code' => -32603,
-                    'message' => 'Google Search Console tools are disabled or not connected. Enable Search Console tools and connect Google OAuth in StifLi Flex MCP > SEO.',
-                ),
+            $r['error'] = array(
+                'code' => -32603,
+                'message' => 'Google Search Console tools are disabled or not connected. Enable Search Console tools and connect Google OAuth in StifLi Flex MCP > SEO.',
             );
+            return $emitToolCalled($r);
         }
 
         $allowed_by_integration = apply_filters('sflmcp_is_tool_enabled_for_integrations', true, $tool, 'call', null);
         if (!$allowed_by_integration) {
-            return array(
-                'jsonrpc' => '2.0',
-                'id' => $id,
-                'error' => array(
-                    'code' => -42609,
-                    'message' => 'Tool is disabled by plugin integration settings',
-                ),
+            $r['error'] = array(
+                'code' => -42609,
+                'message' => 'Tool is disabled by plugin integration settings',
             );
+            return $emitToolCalled($r);
         }
 
         // Change Tracker: capture before-state for mutating tools
@@ -2781,10 +3022,12 @@ class StifliFlexMcpModel {
             return $acf_meta;
         };
 
+        try {
         switch ($tool) {
             case 'wp_search_image':
                 if ( $this->maybeLoadSearchImageModule() && class_exists( 'StifliFlexMcp_Search_Image' ) ) {
-                    return StifliFlexMcp_Search_Image::dispatch( $tool, $args, $id );
+                    $r = StifliFlexMcp_Search_Image::dispatch( $tool, $args, $id );
+                    return $r;
                 }
                 $r['error'] = array('code' => -32603, 'message' => 'Search Image tool is disabled. Enable wp_search_image in Multimedia > Search Image.');
                 return $r;
@@ -3008,6 +3251,11 @@ class StifliFlexMcpModel {
                     'post_status' => $cp_post_status,
                     'post_type' => $cp_post_type,
                 );
+                $cp_date_error = '';
+                if (!$applyPostDate($ins, $args, $cp_date_error, false)) {
+                    $r['error'] = array('code' => -42602, 'message' => $cp_date_error);
+                    break;
+                }
                 if (array_key_exists('post_content', $args)) {
                     $ins['post_content'] = is_scalar($args['post_content']) || null === $args['post_content']
                         ? wp_slash((string) $args['post_content'])
@@ -3251,6 +3499,14 @@ class StifliFlexMcpModel {
                             }
                             continue;
                         }
+                        if (in_array($k, array('date', 'post_date'), true)) {
+                            $up_date_error = '';
+                            if (!$applyPostDate($c, array($k => $v), $up_date_error, true)) {
+                                $r['error'] = array('code' => -42602, 'message' => $up_date_error);
+                                break 2;
+                            }
+                            continue;
+                        }
                         if ('post_name' === $k) {
                             $c[$k] = sanitize_title($v);
                         } else {
@@ -3270,6 +3526,11 @@ class StifliFlexMcpModel {
                     if (!empty($up_tax_input)) {
                         $c['tax_input'] = $up_tax_input;
                     }
+                }
+                $up_date_error = '';
+                if (!$applyPostDate($c, $args, $up_date_error, true)) {
+                    $r['error'] = array('code' => -42602, 'message' => $up_date_error);
+                    break;
                 }
 
                 $u = ( count($c) > 1 ) ? wp_update_post($c, true) : $c['ID'];
@@ -3392,12 +3653,21 @@ class StifliFlexMcpModel {
                 $addResultText($r, wp_json_encode($list, JSON_PRETTY_PRINT));
                 break;
             case 'wp_create_page':
+                $page_status = sanitize_key($utils::getArrayValue($args, 'post_status', 'draft'));
+                if (!in_array($page_status, array('draft', 'publish', 'pending', 'private', 'future'), true)) {
+                    $page_status = 'draft';
+                }
                 $pdata = array(
                     'post_type' => 'page',
                     'post_title' => sanitize_text_field($utils::getArrayValue($args, 'post_title', '')),
                     'post_content' => wp_slash((string) $utils::getArrayValue($args, 'post_content', '')),
-                    'post_status' => sanitize_key($utils::getArrayValue($args, 'post_status', 'draft')),
+                    'post_status' => $page_status,
                 );
+                $page_date_error = '';
+                if (!$applyPostDate($pdata, $args, $page_date_error, false)) {
+                    $r['error'] = array('code' => -42602, 'message' => $page_date_error);
+                    break;
+                }
                 if (!empty($args['post_author'])) {
                     $pdata['post_author'] = intval($args['post_author']);
                 }
@@ -3443,11 +3713,19 @@ class StifliFlexMcpModel {
                         } elseif ('post_title' === $k) {
                             $pdata[$k] = sanitize_text_field($args[$k]);
                         } elseif ('post_status' === $k) {
-                            $pdata[$k] = sanitize_key($args[$k]);
+                            $new_page_status = sanitize_key($args[$k]);
+                            if (in_array($new_page_status, array('draft', 'publish', 'pending', 'private', 'future'), true)) {
+                                $pdata[$k] = $new_page_status;
+                            }
                         } else {
                             $pdata[$k] = intval($args[$k]);
                         }
                     }
+                }
+                $page_date_error = '';
+                if (!$applyPostDate($pdata, $args, $page_date_error, true)) {
+                    $r['error'] = array('code' => -42602, 'message' => $page_date_error);
+                    break;
                 }
                 $u = wp_update_post($pdata, true);
                 if (is_wp_error($u)) {
@@ -4067,12 +4345,57 @@ class StifliFlexMcpModel {
                 $addResultText($r, wp_json_encode($out, JSON_PRETTY_PRINT));
                 break;
             case 'wp_get_terms':
-                $taxonomy = sanitize_text_field($utils::getArrayValue($args, 'taxonomy'));
+                $taxonomy = sanitize_key($utils::getArrayValue($args, 'taxonomy'));
                 if (!$taxonomy) { $r['error'] = array('code' => -42602, 'message' => 'taxonomy required'); break; }
-                $terms = get_terms(array('taxonomy' => $taxonomy, 'hide_empty' => false));
+                if (!taxonomy_exists($taxonomy)) { $r['error'] = array('code' => -42600, 'message' => 'Unknown taxonomy: ' . $taxonomy); break; }
+                $termsPage = max(1, intval($utils::getArrayValue($args, 'page', 1, 1)));
+                $termsPerPage = max(1, min(100, intval($utils::getArrayValue($args, 'per_page', 100, 1))));
+                $includeTermsPagination = $isTruthy($utils::getArrayValue($args, 'include_pagination', false)) || array_key_exists('page', $args) || array_key_exists('per_page', $args);
+                $terms_args = array(
+                    'taxonomy' => $taxonomy,
+                    'hide_empty' => array_key_exists('hide_empty', $args) ? $isTruthy($args['hide_empty']) : false,
+                );
+                if ('' !== (string) $utils::getArrayValue($args, 'search', '')) {
+                    $terms_args['search'] = sanitize_text_field($utils::getArrayValue($args, 'search', ''));
+                }
+                if (array_key_exists('parent', $args)) {
+                    $terms_args['parent'] = max(0, intval($args['parent']));
+                }
+                if ($includeTermsPagination) {
+                    $terms_args['number'] = $termsPerPage;
+                    $terms_args['offset'] = ($termsPage - 1) * $termsPerPage;
+                }
+                $terms = get_terms($terms_args);
+                if (is_wp_error($terms)) { $r['error'] = array('code' => -42603, 'message' => $terms->get_error_message()); break; }
                 $out = array();
-                foreach ($terms as $t) { $out[] = array('term_id' => $t->term_id, 'name' => $t->name, 'slug' => $t->slug, 'count' => $t->count); }
-                $addResultText($r, wp_json_encode($out, JSON_PRETTY_PRINT));
+                foreach ($terms as $t) {
+                    $out[] = array(
+                        'term_id' => (int) $t->term_id,
+                        'taxonomy' => $t->taxonomy,
+                        'name' => $t->name,
+                        'slug' => $t->slug,
+                        'description' => $t->description,
+                        'parent' => (int) $t->parent,
+                        'count' => (int) $t->count,
+                    );
+                }
+                if ($includeTermsPagination) {
+                    $count_args = $terms_args;
+                    unset($count_args['number'], $count_args['offset']);
+                    $count_args['fields'] = 'count';
+                    $total_terms = get_terms($count_args);
+                    if (is_wp_error($total_terms)) { $r['error'] = array('code' => -42603, 'message' => $total_terms->get_error_message()); break; }
+                    $total_terms = (int) $total_terms;
+                    $out = array(
+                        'terms' => $out,
+                        'items' => $out,
+                        'page' => $termsPage,
+                        'per_page' => $termsPerPage,
+                        'total' => $total_terms,
+                        'total_pages' => (int) ceil(max(0, $total_terms) / $termsPerPage),
+                    );
+                }
+                $addResultText($r, wp_json_encode($out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
                 break;
             case 'wp_create_term':
                 $taxonomy = sanitize_text_field($utils::getArrayValue($args, 'taxonomy'));
@@ -5578,13 +5901,16 @@ class StifliFlexMcpModel {
 
             case 'search':
                 $s = sanitize_text_field($utils::getArrayValue($args, 'q', $utils::getArrayValue($args, 'query', '')));
-                $limit = max(1, intval($utils::getArrayValue($args, 'limit', 10, 1)));
+                $limit_key = array_key_exists('per_page', $args) ? 'per_page' : 'limit';
+                $limit = max(1, min(100, intval($utils::getArrayValue($args, $limit_key, 10, 1))));
                 $paged = max(1, intval($utils::getArrayValue($args, 'paged', 1, 1)));
                 $hasOffset = array_key_exists('offset', $args);
                 $offset = $hasOffset ? max(0, intval($args['offset'])) : null;
                 // Keep paged behavior when offset is 0, otherwise page 2 can be stuck on page 1.
                 $useOffset = null !== $offset && $offset > 0;
                 $includePagination = $isTruthy($utils::getArrayValue($args, 'include_pagination', false));
+                $snippetArg = $utils::getArrayValue($args, 'snippet', 0, 1);
+                $snippetLength = $isTruthy($snippetArg) && !is_numeric($snippetArg) ? 240 : max(0, min(1000, intval($snippetArg)));
                 $searchOrderby = sanitize_key($utils::getArrayValue($args, 'orderby', 'date'));
                 $searchOrder = strtoupper(sanitize_text_field($utils::getArrayValue($args, 'order', 'DESC')));
                 $queryArgs = array(
@@ -5626,14 +5952,19 @@ class StifliFlexMcpModel {
                 $q = new WP_Query($queryArgs);
                 $out = array();
                 foreach ($q->posts as $p) {
-                    $out[] = array(
+                    $search_row = array(
                         'ID' => $p->ID,
                         'post_type' => $p->post_type,
                         'post_status' => $p->post_status,
                         'post_title' => $p->post_title,
+                        'slug' => $p->post_name,
                         'excerpt' => $postExcerpt($p),
                         'permalink' => get_permalink($p),
                     );
+                    if ($snippetLength > 0) {
+                        $search_row['snippet'] = $buildSearchSnippet($p->post_content, $s, $snippetLength);
+                    }
+                    $out[] = $search_row;
                 }
                 if ($includePagination) {
                     $effectiveOffset = $useOffset ? $offset : (($paged - 1) * $limit);
@@ -6359,9 +6690,14 @@ class StifliFlexMcpModel {
                 }
                 $post_id = $resolveObjectId($args);
                 $meta_key = isset($args['meta_key']) ? sanitize_text_field($args['meta_key']) : '';
-                $meta_value = isset($args['meta_value']) ? maybe_serialize($args['meta_value']) : null;
+                $meta_error = null;
+                $meta_value = array_key_exists('meta_value', $args) ? $normalizePostMetaValue($args['meta_value'], $meta_error) : null;
                 if (!$post_id || !$meta_key) {
                     $r['error'] = array('code' => 'invalid_params', 'message' => 'Faltan parámetros.');
+                    break;
+                }
+                if (null !== $meta_error) {
+                    $r['error'] = array('code' => 'invalid_params', 'message' => $meta_error);
                     break;
                 }
                 $updated = update_post_meta($post_id, $meta_key, $meta_value);
@@ -6370,6 +6706,50 @@ class StifliFlexMcpModel {
                 } else {
                     $addResultText($r, 'No se pudo crear/actualizar el metadato para post ' . $post_id . ' (' . $meta_key . ')');
                 }
+                break;
+            case 'wp_add_post_meta':
+                if (!current_user_can('manage_options')) {
+                    $r['error'] = array('code' => 'permission_denied', 'message' => 'No tienes permisos para manipular meta.');
+                    break;
+                }
+                $post_id = $resolveObjectId($args);
+                $meta_key = isset($args['meta_key']) ? sanitize_text_field($args['meta_key']) : '';
+                $meta_error = null;
+                $meta_value = array_key_exists('meta_value', $args) ? $normalizePostMetaValue($args['meta_value'], $meta_error) : null;
+                $unique = $isTruthy($utils::getArrayValue($args, 'unique', false));
+                if (!$post_id || !$meta_key) {
+                    $r['error'] = array('code' => 'invalid_params', 'message' => 'Faltan parámetros.');
+                    break;
+                }
+                if (null !== $meta_error) {
+                    $r['error'] = array('code' => 'invalid_params', 'message' => $meta_error);
+                    break;
+                }
+                if ($unique && metadata_exists('post', $post_id, $meta_key)) {
+                    $addResultText($r, wp_json_encode(array(
+                        'created' => false,
+                        'post_id' => $post_id,
+                        'meta_key' => $meta_key,
+                        'reason' => 'already_exists',
+                    ), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+                    break;
+                }
+                $meta_id = add_post_meta($post_id, $meta_key, $meta_value, $unique);
+                if (false === $meta_id) {
+                    $addResultText($r, wp_json_encode(array(
+                        'created' => false,
+                        'post_id' => $post_id,
+                        'meta_key' => $meta_key,
+                        'reason' => 'not_created',
+                    ), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+                    break;
+                }
+                $addResultText($r, wp_json_encode(array(
+                    'created' => true,
+                    'meta_id' => (int) $meta_id,
+                    'post_id' => $post_id,
+                    'meta_key' => $meta_key,
+                ), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
                 break;
             case 'wp_delete_post_meta':
                 if (!current_user_can('manage_options')) {
@@ -7174,6 +7554,44 @@ class StifliFlexMcpModel {
                 );
                 break;
 
+            case 'wp_get_cron_schedule':
+                $cron_report = $this->getCronScheduleReport( $args );
+                if ( isset( $cron_report['error'] ) && is_array( $cron_report['error'] ) ) {
+                    $r['error'] = $cron_report['error'];
+                    break;
+                }
+
+                $cron_summary = isset( $cron_report['summary'] ) && is_array( $cron_report['summary'] ) ? $cron_report['summary'] : array();
+                $addResultText(
+                    $r,
+                    sprintf(
+                        'WP-Cron snapshot: %d events returned (%d matching before limit). Overdue: %d.',
+                        intval( $cron_summary['returned'] ?? 0 ),
+                        intval( $cron_summary['matching_total'] ?? 0 ),
+                        intval( $cron_summary['overdue'] ?? 0 )
+                    ) . "\n\n" . wp_json_encode( $cron_report, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES )
+                );
+                break;
+
+            case 'wp_get_error_log_tail':
+                $tail_report = $this->getErrorLogTailReport( $args );
+                if ( isset( $tail_report['error'] ) && is_array( $tail_report['error'] ) ) {
+                    $r['error'] = $tail_report['error'];
+                    break;
+                }
+
+                $tail_summary = isset( $tail_report['summary'] ) && is_array( $tail_report['summary'] ) ? $tail_report['summary'] : array();
+                $addResultText(
+                    $r,
+                    sprintf(
+                        'Log tail from %s: %d lines returned (%d inspected).',
+                        isset( $tail_report['source'] ) ? (string) $tail_report['source'] : 'unknown',
+                        intval( $tail_summary['returned'] ?? 0 ),
+                        intval( $tail_summary['inspected'] ?? 0 )
+                    ) . "\n\n" . wp_json_encode( $tail_report, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES )
+                );
+                break;
+
             /* ── Changelog / Audit Log Tools ───────────────────── */
 
             case 'mcp_get_changelog':
@@ -7401,8 +7819,11 @@ class StifliFlexMcpModel {
                 $r['error'] = array('code' => -42609, 'message' => 'Unknown tool');
         }
 
-        // Change Tracker: record change if operation succeeded
-        $recordChangeIfNeeded();
+            // Change Tracker: record change if operation succeeded
+            $recordChangeIfNeeded();
+        } finally {
+            $emitToolCalled($r);
+        }
 
         return $r;
     }
@@ -7535,6 +7956,398 @@ class StifliFlexMcpModel {
                 'tests'              => $tests,
             ),
         );
+    }
+
+    /**
+     * Build a snapshot of scheduled WP-Cron events.
+     *
+     * @param array $args Tool arguments.
+     * @return array
+     */
+    private function getCronScheduleReport( $args = array() ) {
+        $args = is_array( $args ) ? $args : array();
+        $hook_filter = isset( $args['hook'] ) ? sanitize_text_field( (string) $args['hook'] ) : '';
+        $overdue_only = $this->coerceBooleanArg( $args, 'overdue_only', false );
+        $include_args = $this->coerceBooleanArg( $args, 'include_args', false );
+        $wp_cron_disabled = defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON;
+        $limit = isset( $args['limit'] ) ? intval( $args['limit'] ) : 250;
+        if ( $limit < 1 ) {
+            $limit = 1;
+        }
+        if ( $limit > 1000 ) {
+            $limit = 1000;
+        }
+
+        if ( ! function_exists( '_get_cron_array' ) ) {
+            return array(
+                'error' => array(
+                    'code' => -32603,
+                    'message' => 'WP-Cron internals are not available in this environment.',
+                ),
+            );
+        }
+
+        $cron = _get_cron_array();
+        if ( ! is_array( $cron ) ) {
+            $cron = array();
+        }
+
+        $schedules = wp_get_schedules();
+        $now = time();
+        $events = array();
+
+        foreach ( $cron as $timestamp => $hooks ) {
+            if ( ! is_array( $hooks ) ) {
+                continue;
+            }
+
+            $run_at = intval( $timestamp );
+            $is_overdue = $run_at < $now;
+            if ( $overdue_only && ! $is_overdue ) {
+                continue;
+            }
+
+            foreach ( $hooks as $hook_name => $instances ) {
+                $hook_name = (string) $hook_name;
+                if ( '' !== $hook_filter && $hook_name !== $hook_filter && false === strpos( $hook_name, $hook_filter ) ) {
+                    continue;
+                }
+
+                if ( ! is_array( $instances ) ) {
+                    continue;
+                }
+
+                foreach ( $instances as $instance ) {
+                    if ( ! is_array( $instance ) ) {
+                        continue;
+                    }
+
+                    $schedule = isset( $instance['schedule'] ) ? (string) $instance['schedule'] : '';
+                    $interval = isset( $instance['interval'] ) ? intval( $instance['interval'] ) : 0;
+                    if ( $interval <= 0 && '' !== $schedule && isset( $schedules[ $schedule ]['interval'] ) ) {
+                        $interval = intval( $schedules[ $schedule ]['interval'] );
+                    }
+
+                    $event_args = isset( $instance['args'] ) && is_array( $instance['args'] ) ? $instance['args'] : array();
+                    $row = array(
+                        'hook' => $hook_name,
+                        'next_run_unix' => $run_at,
+                        'next_run_gmt' => gmdate( 'c', $run_at ),
+                        'next_run_local' => wp_date( 'c', $run_at ),
+                        'overdue' => $is_overdue,
+                        'seconds_until_run' => $run_at - $now,
+                        'schedule' => '' !== $schedule ? $schedule : 'single',
+                        'interval_seconds' => $interval,
+                        'recurring' => '' !== $schedule,
+                    );
+
+                    if ( $include_args ) {
+                        $row['args'] = StifliFlexMcpUtils::redactSecrets( $event_args, $hook_name );
+                    } else {
+                        $row['args_keys'] = array_values( array_map( 'strval', array_keys( $event_args ) ) );
+                    }
+
+                    $events[] = $row;
+                }
+            }
+        }
+
+        usort(
+            $events,
+            static function( $a, $b ) {
+                $a_run = isset( $a['next_run_unix'] ) ? intval( $a['next_run_unix'] ) : 0;
+                $b_run = isset( $b['next_run_unix'] ) ? intval( $b['next_run_unix'] ) : 0;
+                if ( $a_run === $b_run ) {
+                    return strcmp( (string) ( $a['hook'] ?? '' ), (string) ( $b['hook'] ?? '' ) );
+                }
+                return $a_run <=> $b_run;
+            }
+        );
+
+        $matching_total = count( $events );
+        $overdue_count = 0;
+        foreach ( $events as $event ) {
+            if ( ! empty( $event['overdue'] ) ) {
+                $overdue_count++;
+            }
+        }
+
+        if ( count( $events ) > $limit ) {
+            $events = array_slice( $events, 0, $limit );
+        }
+
+        return array(
+            'generated_at_gmt' => gmdate( 'c' ),
+            'generated_at_local' => wp_date( 'c' ),
+            'runtime' => array(
+                'disable_wp_cron' => $wp_cron_disabled,
+                'message' => $wp_cron_disabled
+                    ? 'DISABLE_WP_CRON is enabled. WordPress will not auto-run due events on page loads; use a server cron or run wp-cron.php manually.'
+                    : 'DISABLE_WP_CRON is not enabled. WordPress auto-runs due events during site traffic.',
+            ),
+            'filters' => array(
+                'hook' => $hook_filter,
+                'overdue_only' => $overdue_only,
+                'include_args' => $include_args,
+                'limit' => $limit,
+            ),
+            'summary' => array(
+                'matching_total' => $matching_total,
+                'returned' => count( $events ),
+                'overdue' => $overdue_count,
+            ),
+            'events' => $events,
+        );
+    }
+
+    /**
+     * Return recent lines from runtime logs.
+     *
+     * @param array $args Tool arguments.
+     * @return array
+     */
+    private function getErrorLogTailReport( $args = array() ) {
+        $args = is_array( $args ) ? $args : array();
+        $source = isset( $args['source'] ) ? sanitize_key( (string) $args['source'] ) : 'wp_debug';
+        if ( ! in_array( $source, array( 'wp_debug', 'plugin' ), true ) ) {
+            return array(
+                'error' => array(
+                    'code' => -32602,
+                    'message' => 'Invalid source. Use wp_debug or plugin.',
+                ),
+            );
+        }
+
+        $lines = isset( $args['lines'] ) ? intval( $args['lines'] ) : 120;
+        if ( $lines < 1 ) {
+            $lines = 1;
+        }
+        if ( $lines > 500 ) {
+            $lines = 500;
+        }
+
+        $keyword = isset( $args['keyword'] ) ? sanitize_text_field( (string) $args['keyword'] ) : '';
+
+        if ( 'wp_debug' === $source ) {
+            $wp_debug_enabled = defined( 'WP_DEBUG' ) && WP_DEBUG;
+            $wp_debug_log_enabled = defined( 'WP_DEBUG_LOG' ) && WP_DEBUG_LOG;
+
+            if ( ! $wp_debug_enabled ) {
+                return array(
+                    'source' => $source,
+                    'exists' => false,
+                    'summary' => array(
+                        'requested_lines' => $lines,
+                        'inspected' => 0,
+                        'returned' => 0,
+                    ),
+                    'message' => 'WP_DEBUG is disabled. Enable WP_DEBUG and WP_DEBUG_LOG in wp-config.php to capture debug.log output.',
+                    'config' => array(
+                        'WP_DEBUG' => defined( 'WP_DEBUG' ) ? (bool) WP_DEBUG : null,
+                        'WP_DEBUG_LOG' => defined( 'WP_DEBUG_LOG' ) ? WP_DEBUG_LOG : null,
+                    ),
+                    'lines' => array(),
+                );
+            }
+
+            if ( ! $wp_debug_log_enabled ) {
+                return array(
+                    'source' => $source,
+                    'exists' => false,
+                    'summary' => array(
+                        'requested_lines' => $lines,
+                        'inspected' => 0,
+                        'returned' => 0,
+                    ),
+                    'message' => 'WP_DEBUG_LOG is disabled. Set WP_DEBUG_LOG to true (or a writable log path) in wp-config.php.',
+                    'config' => array(
+                        'WP_DEBUG' => defined( 'WP_DEBUG' ) ? (bool) WP_DEBUG : null,
+                        'WP_DEBUG_LOG' => defined( 'WP_DEBUG_LOG' ) ? WP_DEBUG_LOG : null,
+                    ),
+                    'lines' => array(),
+                );
+            }
+        }
+
+        $log_path = $this->resolveLogPathForSource( $source );
+
+        if ( '' === $log_path ) {
+            return array(
+                'source' => $source,
+                'path' => '',
+                'exists' => false,
+                'summary' => array(
+                    'requested_lines' => $lines,
+                    'inspected' => 0,
+                    'returned' => 0,
+                ),
+                'message' => 'No log path is configured for the selected source.',
+                'lines' => array(),
+            );
+        }
+
+        if ( ! file_exists( $log_path ) ) {
+            $suggestion = 'Log file not found at expected path. Trigger one warning/error, then run this tool again.';
+            if ( 'wp_debug' === $source ) {
+                $suggestion = 'debug.log was not found. Confirm WP_DEBUG_LOG points to this path and that the directory is writable.';
+            }
+            return array(
+                'source' => $source,
+                'path' => $log_path,
+                'exists' => false,
+                'summary' => array(
+                    'requested_lines' => $lines,
+                    'inspected' => 0,
+                    'returned' => 0,
+                ),
+                'message' => $suggestion,
+                'lines' => array(),
+            );
+        }
+
+        $tail_lines = $this->tailFileLines( $log_path, $lines );
+        $inspected_count = count( $tail_lines );
+
+        if ( '' !== $keyword ) {
+            $needle = strtolower( $keyword );
+            $tail_lines = array_values(
+                array_filter(
+                    $tail_lines,
+                    static function( $line ) use ( $needle ) {
+                        return false !== strpos( strtolower( (string) $line ), $needle );
+                    }
+                )
+            );
+        }
+
+        $clean_lines = array();
+        foreach ( $tail_lines as $line ) {
+            $clean_lines[] = (string) StifliFlexMcpUtils::redactSecrets( (string) $line, $source );
+        }
+
+        return array(
+            'source' => $source,
+            'path' => $log_path,
+            'exists' => true,
+            'file_size_bytes' => @filesize( $log_path ), // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- safe fallback for inaccessible log paths.
+            'keyword' => $keyword,
+            'generated_at_gmt' => gmdate( 'c' ),
+            'generated_at_local' => wp_date( 'c' ),
+            'summary' => array(
+                'requested_lines' => $lines,
+                'inspected' => $inspected_count,
+                'returned' => count( $clean_lines ),
+            ),
+            'lines' => $clean_lines,
+        );
+    }
+
+    /**
+     * Resolve a filesystem log path for the requested source.
+     *
+     * @param string $source Log source.
+     * @return string
+     */
+    private function resolveLogPathForSource( $source ) {
+        if ( 'plugin' === $source ) {
+            if ( function_exists( 'stifli_flex_mcp_get_log_file_path' ) ) {
+                return (string) stifli_flex_mcp_get_log_file_path();
+            }
+            return '';
+        }
+
+        if ( defined( 'WP_DEBUG_LOG' ) ) {
+            if ( true === WP_DEBUG_LOG ) {
+                return defined( 'WP_CONTENT_DIR' ) ? WP_CONTENT_DIR . '/debug.log' : '';
+            }
+
+            if ( is_string( WP_DEBUG_LOG ) && '' !== WP_DEBUG_LOG ) {
+                $path = (string) WP_DEBUG_LOG;
+                $is_absolute = '/' === substr( $path, 0, 1 ) || preg_match( '/^[A-Za-z]:[\\\/]/', $path );
+                if ( $is_absolute ) {
+                    return $path;
+                }
+                return trailingslashit( ABSPATH ) . ltrim( $path, '/\\' );
+            }
+        }
+
+        return defined( 'WP_CONTENT_DIR' ) ? WP_CONTENT_DIR . '/debug.log' : '';
+    }
+
+    /**
+     * Read the last N lines of a file without loading the full file into memory.
+     *
+     * @param string $path File path.
+     * @param int    $max_lines Maximum lines to return.
+     * @return array
+     */
+    private function tailFileLines( $path, $max_lines ) {
+        $max_lines = max( 1, intval( $max_lines ) );
+        $fp = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- graceful fallback when file permissions block reads.
+        if ( ! $fp ) {
+            return array();
+        }
+
+        $buffer = '';
+        $chunk_size = 4096;
+        fseek( $fp, 0, SEEK_END );
+        $position = ftell( $fp );
+
+        while ( $position > 0 && substr_count( $buffer, "\n" ) <= $max_lines ) {
+            $seek = max( 0, $position - $chunk_size );
+            $read = $position - $seek;
+            fseek( $fp, $seek );
+            $chunk = fread( $fp, $read );
+            if ( false === $chunk ) {
+                break;
+            }
+            $buffer = $chunk . $buffer;
+            $position = $seek;
+            if ( 0 === $seek ) {
+                break;
+            }
+        }
+
+        fclose( $fp );
+
+        $lines = preg_split( '/\r\n|\n|\r/', $buffer );
+        if ( ! is_array( $lines ) ) {
+            return array();
+        }
+        if ( ! empty( $lines ) && '' === end( $lines ) ) {
+            array_pop( $lines );
+        }
+
+        return array_slice( $lines, -$max_lines );
+    }
+
+    /**
+     * Convert mixed truthy values into booleans.
+     *
+     * @param array  $args Arguments array.
+     * @param string $key Argument key.
+     * @param bool   $default Default value.
+     * @return bool
+     */
+    private function coerceBooleanArg( $args, $key, $default = false ) {
+        if ( ! is_array( $args ) || ! array_key_exists( $key, $args ) ) {
+            return (bool) $default;
+        }
+
+        $value = $args[ $key ];
+        if ( is_bool( $value ) ) {
+            return $value;
+        }
+        if ( is_numeric( $value ) ) {
+            return intval( $value ) > 0;
+        }
+
+        $value = strtolower( trim( (string) $value ) );
+        if ( '' === $value ) {
+            return false;
+        }
+
+        return in_array( $value, array( '1', 'true', 'yes', 'on' ), true );
     }
 
     /**
