@@ -40,7 +40,10 @@ class StifliFlexMcp {
 			}
 			add_action('admin_init', array($this, 'registerSettings'));
 			add_action('admin_init', array($this, 'handleOAuthWellKnownNoticeDismiss'));
+			add_action('admin_init', array($this, 'handleWpMcpHubPromoNoticeDismiss'));
 			add_action('admin_notices', array($this, 'renderOAuthWellKnownNotice'));
+			add_action('admin_notices', array($this, 'renderWpMcpHubPromoNotice'), 20);
+			add_action('admin_footer', array($this, 'renderWpMcpHubPromoFooter'));
 			add_action('admin_enqueue_scripts', array($this, 'enqueueAdminScripts'));
 			// AJAX handlers for profiles management
 			add_action('wp_ajax_sflmcp_create_profile', array($this, 'ajax_create_profile'));
@@ -2804,7 +2807,6 @@ class StifliFlexMcp {
 		if (!in_array((string) $screen->id, $allowedScreens, true)) {
 			return;
 		}
-
 		$helpUrl = admin_url('admin.php?page=sflmcp-server&tab=help#troubleshooting');
 
 		// Warn when Plain permalinks are enabled because OAuth discovery/connectors can fail under restrictive hosts.
@@ -2966,6 +2968,142 @@ class StifliFlexMcp {
 			</p>
 		</div>
 		<?php
+	}
+
+	/**
+	 * Show a promotional banner for WP MCP Hub across StifLi Flex MCP admin pages.
+	 */
+	public function renderWpMcpHubPromoNotice() {
+		if (!current_user_can('manage_options')) {
+			return;
+		}
+
+		if (!$this->isStifliFlexMcpAdminPage()) {
+			return;
+		}
+
+		if ($this->isWpMcpHubPromoNoticeDismissed()) {
+			return;
+		}
+
+		$siteUrl = 'https://andromedanova.com/wp-mcp-hub.html';
+		$repoUrl = 'https://github.com/estebanstifli/wp-mcp-hub';
+		$dismissUrl = wp_nonce_url(
+			add_query_arg(array('sflmcp_dismiss_wp_mcp_hub_promo' => '1')),
+			'sflmcp_dismiss_wp_mcp_hub_promo',
+			'_sflmcpnonce'
+		);
+		?>
+		<div class="notice notice-info" style="border-left-color:#0b7a75; padding:14px 16px;">
+			<p style="margin:0 0 8px 0;"><strong><?php echo esc_html__('If you are an agency or manage many WordPress installations, use one central point to manage them all.', 'stifli-flex-mcp'); ?></strong></p>
+			<p style="margin:0 0 10px 0;">
+				<?php echo esc_html__('WP MCP Hub provides that local central layer for connecting and managing multiple WordPress MCP servers. It is free and open source.', 'stifli-flex-mcp'); ?>
+			</p>
+			<p style="margin:0;">
+				<a class="button button-primary" href="<?php echo esc_url($siteUrl); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html__('View WP MCP Hub', 'stifli-flex-mcp'); ?></a>
+				<a class="button button-secondary" href="<?php echo esc_url($repoUrl); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html__('View on GitHub', 'stifli-flex-mcp'); ?></a>
+				<a class="button button-link" href="<?php echo esc_url($dismissUrl); ?>"><?php echo esc_html__('Dismiss', 'stifli-flex-mcp'); ?></a>
+			</p>
+		</div>
+		<?php
+	}
+
+	/**
+	 * Handle persistent dismissal of WP MCP Hub promo notice per user.
+	 */
+	public function handleWpMcpHubPromoNoticeDismiss() {
+		if (!current_user_can('manage_options')) {
+			return;
+		}
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- nonce verified below.
+		$dismiss = isset($_GET['sflmcp_dismiss_wp_mcp_hub_promo']) ? sanitize_text_field(wp_unslash($_GET['sflmcp_dismiss_wp_mcp_hub_promo'])) : '';
+		if ('1' !== $dismiss) {
+			return;
+		}
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- nonce is explicitly validated.
+		$nonce = isset($_GET['_sflmcpnonce']) ? sanitize_text_field(wp_unslash($_GET['_sflmcpnonce'])) : '';
+		if (!wp_verify_nonce($nonce, 'sflmcp_dismiss_wp_mcp_hub_promo')) {
+			return;
+		}
+
+		$userId = get_current_user_id();
+		if ($userId > 0) {
+			update_user_meta($userId, $this->getWpMcpHubPromoDismissUserMetaKey(), time());
+		}
+
+		$redirect = remove_query_arg(array('sflmcp_dismiss_wp_mcp_hub_promo', '_sflmcpnonce'));
+		wp_safe_redirect($redirect);
+		exit;
+	}
+
+	/**
+	 * Render a non-dismissible footer promo on plugin admin pages.
+	 */
+	public function renderWpMcpHubPromoFooter() {
+		if (!current_user_can('manage_options')) {
+			return;
+		}
+
+		if (!$this->isStifliFlexMcpAdminPage()) {
+			return;
+		}
+
+		$siteUrl = 'https://andromedanova.com/wp-mcp-hub.html';
+		$repoUrl = 'https://github.com/estebanstifli/wp-mcp-hub';
+		?>
+		<div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:8px 14px; margin:16px 0 8px; padding:12px 16px; border:1px solid #72aee6; border-left:4px solid #2271b1; background:#f0f6fc; color:#1d2327; font-size:13px; line-height:1.5; text-align:center;">
+			<span><strong><?php echo esc_html__('WP MCP Hub', 'stifli-flex-mcp'); ?></strong><?php echo esc_html__(' - One local central point for agencies and teams that manage many WordPress installations. Free and open source.', 'stifli-flex-mcp'); ?></span>
+			<span style="display:inline-flex; gap:8px; white-space:nowrap;">
+				<a class="button button-small" href="<?php echo esc_url($siteUrl); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html__('Info', 'stifli-flex-mcp'); ?></a>
+				<a class="button button-small" href="<?php echo esc_url($repoUrl); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html__('GitHub', 'stifli-flex-mcp'); ?></a>
+			</span>
+		</div>
+		<?php
+	}
+
+	/**
+	 * Check whether current user dismissed the WP MCP Hub promo notice.
+	 *
+	 * @return bool
+	 */
+	private function isWpMcpHubPromoNoticeDismissed() {
+		$userId = get_current_user_id();
+		if ($userId <= 0) {
+			return false;
+		}
+
+		$dismissedAt = (int) get_user_meta($userId, $this->getWpMcpHubPromoDismissUserMetaKey(), true);
+		return $dismissedAt > 0;
+	}
+
+	/**
+	 * User meta key for WP MCP Hub promo dismissal.
+	 *
+	 * @return string
+	 */
+	private function getWpMcpHubPromoDismissUserMetaKey() {
+		return 'sflmcp_wp_mcp_hub_promo_dismissed';
+	}
+
+	/**
+	 * Detect whether the current admin page belongs to StifLi Flex MCP.
+	 *
+	 * @return bool
+	 */
+	private function isStifliFlexMcpAdminPage() {
+		if (!is_admin()) {
+			return false;
+		}
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- read-only screen detection.
+		$page = isset($_GET['page']) ? sanitize_text_field(wp_unslash($_GET['page'])) : '';
+		if ('stifli-flex-mcp' === $page) {
+			return true;
+		}
+
+		return 0 === strpos($page, 'sflmcp-');
 	}
 
 	public function handleDownloadMcpbBundle() {

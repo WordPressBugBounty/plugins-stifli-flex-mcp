@@ -5,7 +5,7 @@ Donate link: https://github.com/estebanstifli/stifli-flex-mcp
 Tags:  mcp, chatgpt, claude, woocommerce ai, copilot
 Requires at least: 5.9
 Tested up to: 7.0
-Stable tag: 3.4.4
+Stable tag: 3.4.5
 Requires PHP: 7.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -15,6 +15,18 @@ The most secure MCP Server for WordPress with Undo, plus AI Copilot & Chat Agent
 == Description ==
 
 **StifLi Flex MCP** is the most secure MCP Server for WordPress with built-in Undo. Connect ChatGPT, Claude Desktop, Gemini, and other MCP clients safely, roll back changes when needed, and manage your site through natural conversation without losing control.
+
+**🛰️ Manage many WordPress MCP sites from one place (free and open source)**
+
+If you are an agency or manage many WordPress installations, **WP MCP Hub** gives you one local central point for managing multiple WordPress MCP servers.
+
+* **Open source and free** — no paid hub, site limits, or subscription
+* **One stable AI client setup** — connect once and route to the right site
+* **Local-first architecture** — credentials stay in your operating system vault
+
+Explore WP MCP Hub:
+* https://andromedanova.com/wp-mcp-hub.html
+* https://github.com/estebanstifli/wp-mcp-hub
 
 Choose the layers your site needs without loading the rest:
 
@@ -439,6 +451,10 @@ This plugin connects to third-party AI services to power the AI Chat Agent, AI C
 When using the MCP server with external AI clients (ChatGPT, Claude Desktop, LibreChat, etc.), API requests are made by the AI client's backend servers to your WordPress MCP endpoint. The plugin itself does not send data to third parties in this scenario — the external MCP client initiates all communication.
 
 == Changelog ==
+= 3.4.5 =
+* New: Added WP MCP Hub links and a free, open-source multi-site management message to the plugin documentation.
+* New: Added a dismissible WP MCP Hub notice and a persistent footer message across StifLi Flex MCP admin pages.
+
 = 3.4.4 =
 * New: Added `elementor_update_widget` to update Elementor widget settings by `element_id` with undo compatibility.
 * New: Added `elementor_export_template` to export Elementor template/page data as JSON for portability workflows.
