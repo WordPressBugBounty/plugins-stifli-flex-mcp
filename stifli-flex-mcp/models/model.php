@@ -2231,15 +2231,18 @@ class StifliFlexMcpModel {
             'wp_update_page' => 'edit_pages',
             'wp_delete_page' => 'delete_pages',
             // comments
+            'wp_get_comments' => 'moderate_comments',
             'wp_create_comment' => 'moderate_comments',
             'wp_update_comment' => 'moderate_comments',
             'wp_delete_comment' => 'moderate_comments',
             // Removed for WordPress.org compliance: wp_create_user, wp_update_user, wp_delete_user
             // user meta
+            'wp_get_users' => 'list_users',
             'wp_get_user_meta' => 'list_users',
             'wp_update_user_meta' => 'edit_users',
             'wp_delete_user_meta' => 'edit_users',
             // post revisions
+            'wp_get_post_revisions' => 'edit_posts',
             'wp_restore_post_revision' => 'edit_posts',
             // site health
             'wp_get_site_health' => 'manage_options',
@@ -2261,6 +2264,8 @@ class StifliFlexMcpModel {
             'wp_update_media_item' => 'upload_files',
             'wp_delete_media_item' => 'delete_posts',
             // plugins/themes
+            'wp_list_plugins' => 'manage_options',
+            'wp_get_themes' => 'switch_themes',
             'wp_activate_plugin' => 'activate_plugins',
             'wp_deactivate_plugin' => 'activate_plugins',
             'wp_install_plugin' => 'install_plugins',
@@ -2271,6 +2276,7 @@ class StifliFlexMcpModel {
             'wp_css_set_global' => 'edit_theme_options',
             'wp_css_set_scoped' => 'manage_options',
             'wp_get_plugin_settings' => 'manage_options',
+            'fetch' => 'manage_options',
             'wp_add_post_meta' => 'manage_options',
             'wp_update_post_meta' => 'manage_options',
             'wp_delete_post_meta' => 'manage_options',
@@ -2284,7 +2290,13 @@ class StifliFlexMcpModel {
             'wp_get_term_meta'    => 'manage_categories',
             'wp_update_term_meta' => 'manage_categories',
             'wp_delete_term_meta' => 'manage_categories',
+            'wp_get_taxonomies' => 'manage_options',
+            'wp_get_terms' => 'manage_categories',
+            'wp_get_post_types' => 'manage_options',
             // menús
+            'wp_get_nav_menus' => 'edit_theme_options',
+            'wp_get_menus' => 'edit_theme_options',
+            'wp_get_menu' => 'edit_theme_options',
             'wp_create_nav_menu' => 'edit_theme_options',
             'wp_add_nav_menu_item' => 'edit_theme_options',
             'wp_update_nav_menu_item' => 'edit_theme_options',
@@ -2376,6 +2388,24 @@ class StifliFlexMcpModel {
         $cleanHtml = function($v) { return wp_kses_post( wp_unslash( $v ) ); };
         $postExcerpt = function($p) {
             return wp_trim_words( wp_strip_all_tags( isset($p->post_excerpt) && !empty($p->post_excerpt) ? $p->post_excerpt : $p->post_content ), 55 );
+        };
+        $canReadPost = function($post) {
+            if (!$post instanceof WP_Post || !current_user_can('read_post', $post->ID)) {
+                return false;
+            }
+
+            if ('' !== (string) $post->post_password && !current_user_can('edit_post', $post->ID)) {
+                return false;
+            }
+
+            if ('attachment' === $post->post_type && !empty($post->post_parent)) {
+                $parent = get_post($post->post_parent);
+                if ($parent instanceof WP_Post && (!current_user_can('read_post', $parent->ID) || ('' !== (string) $parent->post_password && !current_user_can('edit_post', $parent->ID)))) {
+                    return false;
+                }
+            }
+
+            return true;
         };
         $buildSearchSnippet = function($content, $term, $length) {
             $length = max(0, min(1000, (int) $length));
@@ -3166,6 +3196,7 @@ class StifliFlexMcpModel {
                     'post_type' => sanitize_key($utils::getArrayValue($args, 'post_type', 'post')),
                     'post_status' => sanitize_key($utils::getArrayValue($args, 'post_status', 'publish')),
                     'posts_per_page' => $postsLimit,
+                    'perm' => 'readable',
                     'no_found_rows' => !$includePostsPagination,
                 );
                 $postsSearch = sanitize_text_field($utils::getArrayValue($args, 'search'));
@@ -3190,6 +3221,9 @@ class StifliFlexMcpModel {
                 $postQuery = new WP_Query($q);
                 $rows = array();
                 foreach ($postQuery->posts as $p) {
+                    if (!$canReadPost($p)) {
+                        continue;
+                    }
                     $row = array(
                         'ID' => $p->ID,
                         'post_type' => $p->post_type,
@@ -3227,6 +3261,10 @@ class StifliFlexMcpModel {
                 $p = get_post($get_post_id);
                 if (!$p) {
                     $r['error'] = array('code' => -42600, 'message' => 'Post not found');
+                    break;
+                }
+                if (!$canReadPost($p)) {
+                    $r['error'] = array('code' => -42603, 'message' => 'Insufficient permissions to read this post');
                     break;
                 }
                 $includeSingleAuthor = $isTruthy($utils::getArrayValue($args, 'include_author', false));
@@ -3797,6 +3835,7 @@ class StifliFlexMcpModel {
                     'post_type' => 'page',
                     'post_status' => $utils::getArrayValue($args, 'post_status', 'publish'),
                     'numberposts' => max(1, $utils::getArrayValue($args, 'limit', 10, 1)),
+                    'perm' => 'readable',
                     'orderby' => $utils::getArrayValue($args, 'orderby', 'date'),
                     'order' => $utils::getArrayValue($args, 'order', 'DESC'),
                 );
@@ -3808,6 +3847,9 @@ class StifliFlexMcpModel {
                 }
                 $list = array();
                 foreach (get_posts($pargs) as $p) {
+                    if (!$canReadPost($p)) {
+                        continue;
+                    }
                     $list[] = array(
                         'ID' => $p->ID,
                         'post_title' => $p->post_title,
@@ -4252,10 +4294,11 @@ class StifliFlexMcpModel {
                 $addResultText($r, wp_json_encode($out, JSON_PRETTY_PRINT));
                 break;
             case 'wp_get_media':
-                $q = array('post_type' => 'attachment', 'posts_per_page' => max(1, intval($utils::getArrayValue($args, 'limit', 20, 1))));
+                $q = array('post_type' => 'attachment', 'posts_per_page' => max(1, intval($utils::getArrayValue($args, 'limit', 20, 1))), 'perm' => 'readable');
                 if (isset($args['offset'])) { $q['offset'] = max(0, intval($args['offset'])); }
                 $rows = array();
                 foreach (get_posts($q) as $a) {
+                    if (!$canReadPost($a)) { continue; }
                     $rows[] = array('ID' => $a->ID, 'post_title' => $a->post_title, 'mime_type' => get_post_mime_type($a), 'url' => wp_get_attachment_url($a->ID));
                 }
                 $addResultText($r, wp_json_encode($rows, JSON_PRETTY_PRINT));
@@ -4265,6 +4308,7 @@ class StifliFlexMcpModel {
                 if (!$media_id) { $r['error'] = array('code' => -42602, 'message' => 'ID required'); break; }
                 $att = get_post($media_id);
                 if (!$att || 'attachment' !== $att->post_type) { $r['error'] = array('code' => -42600, 'message' => 'Media not found'); break; }
+                if (!$canReadPost($att)) { $r['error'] = array('code' => -42603, 'message' => 'Insufficient permissions to read this media item'); break; }
                 $meta = wp_get_attachment_metadata($att->ID);
                 $out = array('ID' => $att->ID, 'post_title' => $att->post_title, 'mime_type' => get_post_mime_type($att), 'url' => wp_get_attachment_url($att->ID), 'meta' => $meta);
                 $addResultText($r, wp_json_encode($out, JSON_PRETTY_PRINT));
@@ -6140,6 +6184,7 @@ class StifliFlexMcpModel {
                     'post_type' => sanitize_key($utils::getArrayValue($args, 'post_type', 'post')),
                     'post_status' => sanitize_key($utils::getArrayValue($args, 'post_status', 'publish')),
                     'posts_per_page' => $limit,
+                    'perm' => 'readable',
                     'orderby' => '' !== $searchOrderby ? $searchOrderby : 'date',
                     'order' => in_array($searchOrder, array('ASC', 'DESC'), true) ? $searchOrder : 'DESC',
                     'no_found_rows' => !$includePagination,
@@ -6174,6 +6219,9 @@ class StifliFlexMcpModel {
                 $q = new WP_Query($queryArgs);
                 $out = array();
                 foreach ($q->posts as $p) {
+                    if (!$canReadPost($p)) {
+                        continue;
+                    }
                     $search_row = array(
                         'ID' => $p->ID,
                         'post_type' => $p->post_type,
@@ -7689,6 +7737,10 @@ class StifliFlexMcpModel {
                 $post_id = intval($utils::getArrayValue($args, 'post_id', 0));
                 if (empty($post_id)) {
                     $r['error'] = array('code' => -42602, 'message' => 'post_id required');
+                    break;
+                }
+                if (!current_user_can('edit_post', $post_id)) {
+                    $r['error'] = array('code' => -42603, 'message' => 'Insufficient permissions to read revisions for this post');
                     break;
                 }
                 
