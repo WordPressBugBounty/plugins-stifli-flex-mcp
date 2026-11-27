@@ -1,9 +1,9 @@
 <?php
 /*
-Plugin Name: StifLi Flex MCP - MCP Server with undo for ChatGPT, Claude & Gemini
+Plugin Name: Flex MCP - Connect ChatGPT, Claude and AI agents with MCP, Undo, Abilities and Tools.
 Plugin URI: https://github.com/estebanstifli/stifli-flex-mcp
-Description: Transform your WordPress site into a Model Context Protocol (MCP) server. Expose 125+ tools across WordPress, WooCommerce, SEO, plugin integrations, and WordPress Abilities that AI agents like ChatGPT, Claude, and LibreChat can use via JSON-RPC 2.0.
-Version: 3.4.8
+Description: Connect ChatGPT, Claude, Gemini, and other AI agents to WordPress through MCP with OAuth 2.1, Undo, Abilities, and 125+ tools for WordPress, WooCommerce, SEO, media, and plugin integrations.
+Version: 3.6.1
 Author: estebandestifli
 Requires PHP: 7.4
 License: GPL v2 or later
@@ -14,6 +14,10 @@ Domain Path: /languages
 
 if ( ! defined( 'ABSPATH' ) ) {
 	exit;
+}
+
+if ( ! defined( 'SFLMCP_VERSION' ) ) {
+	define( 'SFLMCP_VERSION', '3.6.1' );
 }
 
 // define debug constant 
@@ -162,8 +166,11 @@ require_once __DIR__ . '/models/dispatcher.php';
 require_once __DIR__ . '/models/req.php';
 require_once __DIR__ . '/models/model.php';
 require_once __DIR__ . '/models/class-change-tracker.php';
+require_once __DIR__ . '/models/class-preview-links.php';
 require_once __DIR__ . '/controller.php';
 require_once __DIR__ . '/mod.php';
+
+StifliFlexMcp_Preview_Links::init();
 
 StifliFlexMcp_Addons::register_admin_hooks();
 
@@ -1029,6 +1036,8 @@ function stifli_flex_mcp_seed_initial_tools() {
 		array('wp_update_post', 'Update a post by ID with fields object.', 'WordPress - Posts', 1),
 		array('wp_delete_post', 'Delete a post by ID.', 'WordPress - Posts', 1),
 		array('wp_set_featured_image', 'Set or remove the featured image (post thumbnail) of a post.', 'WordPress - Posts', 1),
+		array('wp_publish_and_promote', 'Publish a draft and add it to a navigation menu atomically.', 'WordPress - Posts', 1),
+		array('wp_create_preview_link', 'Create a temporary shareable preview link for a non-public post.', 'WordPress - Posts', 1),
 		
 		// Pages
 		array('wp_get_pages', 'List pages with filters (post_status, search, limit, offset, orderby, order).', 'WordPress - Pages', 1),
@@ -1063,7 +1072,8 @@ function stifli_flex_mcp_seed_initial_tools() {
 		array('wp_get_media', 'List media items (attachments) with filters.', 'WordPress - Media', 1),
 		array('wp_get_media_item', 'Get a single media item by ID.', 'WordPress - Media', 1),
 		array('wp_upload_image_from_url', 'Upload an image from URL and attach to a post.', 'WordPress - Media', 1),
-		array('wp_upload_image', 'Upload image from base64 data (AI-generated images).', 'WordPress - Media', 1),
+		array('wp_upload_image', 'Upload a ChatGPT conversation image directly; base64 remains available for legacy clients.', 'WordPress - Media', 1),
+		array('wp_upload_media', 'Upload conversation files, HTTPS URLs or base64 with optional image optimization.', 'WordPress - Media', 0),
 		array('wp_update_media_item', 'Update media item metadata.', 'WordPress - Media', 1),
 		array('wp_delete_media_item', 'Delete a media item by ID.', 'WordPress - Media', 1),
 		
@@ -1094,6 +1104,7 @@ function stifli_flex_mcp_seed_initial_tools() {
 		array('wp_get_menus', 'List all navigation menus (alias for wp_get_nav_menus).', 'WordPress - Menus', 1),
 		array('wp_get_menu', 'Get a specific menu with its items.', 'WordPress - Menus', 1),
 		array('wp_create_nav_menu', 'Create a new navigation menu.', 'WordPress - Menus', 1),
+		array('wp_create_menu', 'Create a navigation menu with optional theme-location assignment.', 'WordPress - Menus', 1),
 		array('wp_reorder_menu_items', 'Reorder items in a navigation menu (batch update menu_order/parent).', 'WordPress - Menus', 1),
 		
 		// Options y Meta
@@ -1103,6 +1114,8 @@ function stifli_flex_mcp_seed_initial_tools() {
 		array('wp_get_option', 'Get a WordPress option by key.', 'WordPress - Options', 1),
 		array('wp_get_plugin_settings', 'Safely inspect plugin-related wp_options by plugin_slug/prefixes with recursive secret redaction.', 'WordPress - Options', 1),
 		array('wp_update_option', 'Update a WordPress option.', 'WordPress - Options', 1),
+		array('wp_verify_rendered_page', 'Verify public page HTML after edits without executing JavaScript.', 'WordPress - Posts', 1),
+		array('wp_update_permalink_structure', 'Update the permalink structure while preserving native WordPress tokens.', 'WordPress - Settings', 1),
 		array('wp_get_post_meta', 'Get post meta by post_id and meta_key.', 'WordPress - Meta', 1),
 		array('wp_add_post_meta', 'Add post meta without overwriting existing rows.', 'WordPress - Meta', 1),
 		array('wp_update_post_meta', 'Update post meta.', 'WordPress - Meta', 1),
@@ -1131,6 +1144,7 @@ function stifli_flex_mcp_seed_initial_tools() {
 		array('wp_rm_update_post_seo', 'Update Rank Math SEO metadata fields for a post.', 'WordPress - SEO', 1),
 		// SEO - Yoast
 		array('yoast_get_meta', 'Get Yoast SEO meta fields for a post (title, description, OG, Twitter). Requires Yoast SEO.', 'WordPress - SEO', 1),
+		array('yoast_get_schema', 'Get the resolved Yoast SEO JSON-LD schema graph for a post. Requires Yoast SEO.', 'WordPress - SEO', 1),
 		array('yoast_set_meta', 'Set Yoast SEO meta fields for a post. Requires Yoast SEO.', 'WordPress - SEO', 1),
 		array('yoast_reindex', 'Clear Yoast SEO indexables cache for a post or site-wide. Requires Yoast SEO.', 'WordPress - SEO', 1),
 		// SEO - Google Search Console
@@ -1148,7 +1162,9 @@ function stifli_flex_mcp_seed_initial_tools() {
 		array('acf_update_field', 'Update an ACF field value for a post. Requires ACF.', 'Plugins - ACF', 1),
 		// WPForms
 		array('wpforms_list_forms', 'List all WPForms forms. Requires WPForms.', 'Plugins - Forms', 1),
+		array('wpforms_get_form', 'Get a WPForms form schema with normalized fields and choices. Requires WPForms.', 'Plugins - Forms', 1),
 		array('wpforms_get_entries', 'Get form entries for a WPForms form. Requires WPForms.', 'Plugins - Forms', 1),
+		array('wpforms_get_entry', 'Get one WPForms entry with normalized dates and sensitive-key redaction. Requires WPForms entry storage.', 'Plugins - Forms', 1),
 		// Gravity Forms
 		array('gf_list_forms', 'List all Gravity Forms. Requires Gravity Forms.', 'Plugins - Forms', 1),
 		array('gf_get_entries', 'Get entries for a Gravity Forms form. Requires Gravity Forms.', 'Plugins - Forms', 1),
@@ -1156,6 +1172,10 @@ function stifli_flex_mcp_seed_initial_tools() {
 		// Forminator
 		array('forminator_list_forms', 'List all Forminator forms (custom forms, polls, quizzes). Requires Forminator.', 'Plugins - Forms', 1),
 		array('forminator_get_entries', 'Get submission entries for a Forminator form. Requires Forminator.', 'Plugins - Forms', 1),
+		// Contact Form 7 and Flamingo
+		array('cf7_list_forms', 'List Contact Form 7 forms with status, dates, and field counts. Requires Contact Form 7.', 'Plugins - Forms', 1),
+		array('cf7_get_form', 'Get a Contact Form 7 form with its normalized field schema. Requires Contact Form 7.', 'Plugins - Forms', 1),
+		array('flamingo_get_submissions', 'Read redacted Contact Form 7 submissions stored by Flamingo. Requires Contact Form 7 and Flamingo.', 'Plugins - Forms', 1),
 		// The Events Calendar
 		array('wp_tec_list_events', 'List The Events Calendar events with filters for date, status, venue, organizer, categories and tags.', 'Plugins - The Events Calendar', 1),
 		array('wp_tec_get_event', 'Get full details for a single The Events Calendar event.', 'Plugins - The Events Calendar', 1),
@@ -1226,6 +1246,7 @@ function stifli_flex_mcp_seed_initial_tools() {
 	
 	// WooCommerce Orders
 	$tools[] = array('wc_get_orders', 'List WooCommerce orders with filters.', 'WooCommerce - Orders', 1);
+	$tools[] = array('wc_get_order', 'Get one WooCommerce order with line items, fees, shipping, and payment details.', 'WooCommerce - Orders', 1);
 	$tools[] = array('wc_create_order', 'Create a new WooCommerce order.', 'WooCommerce - Orders', 1);
 	$tools[] = array('wc_update_order', 'Update a WooCommerce order by ID.', 'WooCommerce - Orders', 1);
 	$tools[] = array('wc_delete_order', 'Delete a WooCommerce order by ID.', 'WooCommerce - Orders', 1);
@@ -1377,13 +1398,13 @@ function stifli_flex_mcp_upgrade_302() {
 }
 
 /**
- * Current StifLi Flex MCP database/schema version.
+ * Current Flex MCP database/schema version.
  *
  * Bump this constant whenever a new upgrade routine is added so existing
  * installs run the migration once and only once.
  */
 if ( ! defined( 'SFLMCP_DB_VERSION' ) ) {
-	define( 'SFLMCP_DB_VERSION', '2026.07.12.1' );
+	define( 'SFLMCP_DB_VERSION', '2026.10.02.1' );
 }
 
 /**
@@ -1417,6 +1438,13 @@ function stifli_flex_mcp_maybe_upgrade_db() {
 	stifli_flex_mcp_upgrade_elementor_integration_tools();
 	stifli_flex_mcp_upgrade_gsc_tools();
 	stifli_flex_mcp_upgrade_338_seed_css_tools();
+	stifli_flex_mcp_upgrade_350_seed_divi_editorial_tools();
+	stifli_flex_mcp_upgrade_351_seed_builder_fidelity_tools();
+	stifli_flex_mcp_upgrade_352_seed_reliability_tools();
+	stifli_flex_mcp_upgrade_354_seed_cf7_tools();
+	if ( ! stifli_flex_mcp_upgrade_360() ) {
+		return;
+	}
 	stifli_flex_mcp_upgrade_remove_unified_seo_tools();
 	stifli_flex_mcp_upgrade_retire_custom_tools();
 	update_option( 'sflmcp_db_version', SFLMCP_DB_VERSION, false );
@@ -2121,6 +2149,315 @@ function stifli_flex_mcp_upgrade_wave1_tools() {
 }
 
 /**
+ * Upgrade routine (3.4.9): seed the detailed WooCommerce order tool and
+ * attach it to the relevant system profiles for existing installs.
+ */
+function stifli_flex_mcp_upgrade_349_seed_order_detail_tool() {
+	global $wpdb;
+	$flag = 'sflmcp_upgrade_349_seed_order_detail_tool_done';
+	if ( get_option( $flag ) ) {
+		return;
+	}
+
+	$tools_table = $wpdb->prefix . 'sflmcp_tools';
+	$profiles_table = $wpdb->prefix . 'sflmcp_profiles';
+	$profile_tools_table = $wpdb->prefix . 'sflmcp_profile_tools';
+	if ( ! stifli_flex_mcp_table_exists( $tools_table ) ) {
+		return;
+	}
+
+	$now = current_time( 'mysql', true );
+	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+	$exists = $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$tools_table} WHERE tool_name = %s", 'wc_get_order' ) );
+	if ( ! $exists ) {
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+		$wpdb->insert(
+			$tools_table,
+			array(
+				'tool_name' => 'wc_get_order',
+				'tool_description' => 'Get one WooCommerce order with line items, fees, shipping, and payment details.',
+				'category' => 'WooCommerce - Orders',
+				'enabled' => 1,
+				'created_at' => $now,
+				'updated_at' => $now,
+			),
+			array( '%s', '%s', '%s', '%d', '%s', '%s' )
+		);
+	}
+
+	if ( stifli_flex_mcp_table_exists( $profiles_table ) && stifli_flex_mcp_table_exists( $profile_tools_table ) ) {
+		$profile_names = array( 'WooCommerce Read Only', 'WooCommerce Store Management', 'Complete E-commerce', 'Safe Mode' );
+		foreach ( $profile_names as $profile_name ) {
+			$profile_id = $wpdb->get_var(
+				$wpdb->prepare(
+					"SELECT id FROM {$profiles_table} WHERE profile_name = %s AND is_system = 1 LIMIT 1",
+					$profile_name
+				)
+			);
+			if ( ! $profile_id ) {
+				continue;
+			}
+			$profile_tool_exists = $wpdb->get_var(
+				$wpdb->prepare(
+					"SELECT COUNT(*) FROM {$profile_tools_table} WHERE profile_id = %d AND tool_name = %s",
+					(int) $profile_id,
+					'wc_get_order'
+				)
+			);
+			if ( ! $profile_tool_exists ) {
+				$wpdb->insert(
+					$profile_tools_table,
+					array( 'profile_id' => (int) $profile_id, 'tool_name' => 'wc_get_order' ),
+					array( '%d', '%s' )
+				);
+			}
+		}
+	}
+
+	update_option( $flag, '1' );
+}
+
+/**
+ * Upgrade routine (3.5.0): add Divi integration and editorial workflow tools.
+ */
+function stifli_flex_mcp_upgrade_350_seed_divi_editorial_tools() {
+	global $wpdb;
+	$flag = 'sflmcp_upgrade_350_seed_divi_editorial_tools_done';
+	if ( get_option( $flag ) ) {
+		return;
+	}
+
+	$tools_table = $wpdb->prefix . 'sflmcp_tools';
+	$profiles_table = $wpdb->prefix . 'sflmcp_profiles';
+	$profile_tools_table = $wpdb->prefix . 'sflmcp_profile_tools';
+	if ( ! stifli_flex_mcp_table_exists( $tools_table ) ) {
+		return;
+	}
+
+	$now = current_time( 'mysql', true );
+	$new_tools = array(
+		array( 'wp_publish_and_promote', 'Publish a draft and add it to a navigation menu atomically.', 'WordPress - Posts', 1 ),
+		array( 'wp_create_preview_link', 'Create a temporary shareable preview link for a non-public post.', 'WordPress - Posts', 1 ),
+		array( 'wp_create_menu', 'Create a navigation menu with optional theme-location assignment.', 'WordPress - Menus', 1 ),
+		array( 'divi_get_page_format', 'Inspect Divi Builder mode, page layout, shortcode count, and content size.', 'Plugins - Divi', 1 ),
+		array( 'divi_get_page_outline', 'Get a compact ordered outline of Divi layout shortcodes.', 'Plugins - Divi', 1 ),
+		array( 'divi_validate_layout', 'Validate Divi shortcode nesting and balance without executing it.', 'Plugins - Divi', 1 ),
+		array( 'divi_list_local_templates', 'List layouts from the local Divi Library.', 'Plugins - Divi', 1 ),
+		array( 'divi_library_get', 'Get one Divi Library layout with content, outline, and validation.', 'Plugins - Divi', 1 ),
+		array( 'divi_replace_text', 'Safely replace visible text between Divi shortcodes with dry-run support.', 'Plugins - Divi', 1 ),
+	);
+
+	foreach ( $new_tools as $tool ) {
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+		$exists = $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$tools_table} WHERE tool_name = %s", $tool[0] ) );
+		if ( ! $exists ) {
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+			$wpdb->insert(
+				$tools_table,
+				array(
+					'tool_name' => $tool[0],
+					'tool_description' => $tool[1],
+					'category' => $tool[2],
+					'enabled' => $tool[3],
+					'created_at' => $now,
+					'updated_at' => $now,
+				),
+				array( '%s', '%s', '%s', '%d', '%s', '%s' )
+			);
+		}
+	}
+
+	if ( stifli_flex_mcp_table_exists( $profiles_table ) && stifli_flex_mcp_table_exists( $profile_tools_table ) ) {
+		$profile_id = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT id FROM {$profiles_table} WHERE profile_name = %s AND is_system = 1 LIMIT 1",
+				'WordPress Full Management'
+			)
+		);
+		if ( $profile_id ) {
+			foreach ( array( 'wp_publish_and_promote', 'wp_create_preview_link', 'wp_create_menu' ) as $tool_name ) {
+				$exists = $wpdb->get_var(
+					$wpdb->prepare(
+						"SELECT COUNT(*) FROM {$profile_tools_table} WHERE profile_id = %d AND tool_name = %s",
+						(int) $profile_id,
+						$tool_name
+					)
+				);
+				if ( ! $exists ) {
+					$wpdb->insert(
+						$profile_tools_table,
+						array( 'profile_id' => (int) $profile_id, 'tool_name' => $tool_name ),
+						array( '%d', '%s' )
+					);
+				}
+			}
+		}
+	}
+
+	update_option( $flag, '1' );
+}
+
+/**
+ * Upgrade routine (3.5.1): add builder workflow and permalink fidelity tools.
+ */
+function stifli_flex_mcp_upgrade_351_seed_builder_fidelity_tools() {
+	global $wpdb;
+	$flag = 'sflmcp_upgrade_351_seed_builder_fidelity_tools_done';
+	if ( get_option( $flag ) ) {
+		return;
+	}
+
+	$tools_table = $wpdb->prefix . 'sflmcp_tools';
+	$profiles_table = $wpdb->prefix . 'sflmcp_profiles';
+	$profile_tools_table = $wpdb->prefix . 'sflmcp_profile_tools';
+	if ( ! stifli_flex_mcp_table_exists( $tools_table ) ) {
+		return;
+	}
+
+	$now = current_time( 'mysql', true );
+	$new_tools = array(
+		array( 'wp_update_permalink_structure', 'Update the permalink structure while preserving native WordPress tokens.', 'WordPress - Settings', 1 ),
+		array( 'elementor_apply_template_to_page', 'Apply a local Elementor template to a page in replace or append mode.', 'Plugins - Elementor', 1 ),
+		array( 'elementor_repair_render', 'Repair one Elementor document with valid existing builder data.', 'Plugins - Elementor', 1 ),
+		array( 'elementor_repair_render_bulk', 'Repair up to 50 Elementor documents with valid existing builder data.', 'Plugins - Elementor', 1 ),
+		array( 'divi_clone_page', 'Clone a Divi page or post while preserving builder content and metadata.', 'Plugins - Divi', 1 ),
+		array( 'divi_replace_image', 'Replace an exact image URL in Divi content with dry-run and count guard.', 'Plugins - Divi', 1 ),
+		array( 'divi_apply_library_template', 'Apply a validated local Divi Library layout to a page or post.', 'Plugins - Divi', 1 ),
+	);
+
+	foreach ( $new_tools as $tool ) {
+		$exists = $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$tools_table} WHERE tool_name = %s", $tool[0] ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+		if ( ! $exists ) {
+			$wpdb->insert( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+				$tools_table,
+				array(
+					'tool_name' => $tool[0],
+					'tool_description' => $tool[1],
+					'category' => $tool[2],
+					'enabled' => $tool[3],
+					'created_at' => $now,
+					'updated_at' => $now,
+				),
+				array( '%s', '%s', '%s', '%d', '%s', '%s' )
+			);
+		}
+	}
+
+	if ( stifli_flex_mcp_table_exists( $profiles_table ) && stifli_flex_mcp_table_exists( $profile_tools_table ) ) {
+		$profile_id = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT id FROM {$profiles_table} WHERE profile_name = %s AND is_system = 1 LIMIT 1",
+				'WordPress Full Management'
+			)
+		);
+		if ( $profile_id ) {
+			$exists = $wpdb->get_var(
+				$wpdb->prepare(
+					"SELECT COUNT(*) FROM {$profile_tools_table} WHERE profile_id = %d AND tool_name = %s",
+					(int) $profile_id,
+					'wp_update_permalink_structure'
+				)
+			);
+			if ( ! $exists ) {
+				$wpdb->insert(
+					$profile_tools_table,
+					array( 'profile_id' => (int) $profile_id, 'tool_name' => 'wp_update_permalink_structure' ),
+					array( '%d', '%s' )
+				);
+			}
+		}
+	}
+
+	update_option( $flag, '1' );
+}
+
+/**
+ * Upgrade routine (3.5.2): add richer Yoast and WPForms read tools.
+ */
+function stifli_flex_mcp_upgrade_352_seed_reliability_tools() {
+	global $wpdb;
+	$flag = 'sflmcp_upgrade_352_seed_reliability_tools_done';
+	if ( get_option( $flag ) ) {
+		return;
+	}
+
+	$tools_table = $wpdb->prefix . 'sflmcp_tools';
+	if ( ! stifli_flex_mcp_table_exists( $tools_table ) ) {
+		return;
+	}
+
+	$now = current_time( 'mysql', true );
+	$new_tools = array(
+		array( 'yoast_get_schema', 'Get the resolved Yoast SEO JSON-LD schema graph for a post. Requires Yoast SEO.', 'WordPress - SEO', 1 ),
+		array( 'wpforms_get_form', 'Get a WPForms form schema with normalized fields and choices. Requires WPForms.', 'Plugins - Forms', 1 ),
+		array( 'wpforms_get_entry', 'Get one WPForms entry with normalized dates and sensitive-key redaction. Requires WPForms entry storage.', 'Plugins - Forms', 1 ),
+	);
+
+	foreach ( $new_tools as $tool ) {
+		$exists = $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$tools_table} WHERE tool_name = %s", $tool[0] ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+		if ( ! $exists ) {
+			$wpdb->insert( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+				$tools_table,
+				array(
+					'tool_name' => $tool[0],
+					'tool_description' => $tool[1],
+					'category' => $tool[2],
+					'enabled' => $tool[3],
+					'created_at' => $now,
+					'updated_at' => $now,
+				),
+				array( '%s', '%s', '%s', '%d', '%s', '%s' )
+			);
+		}
+	}
+
+	update_option( $flag, '1' );
+}
+
+/**
+ * Upgrade routine (3.5.4): add Contact Form 7 and Flamingo read tools.
+ */
+function stifli_flex_mcp_upgrade_354_seed_cf7_tools() {
+	global $wpdb;
+	$flag = 'sflmcp_upgrade_354_seed_cf7_tools_done';
+	if ( get_option( $flag ) ) {
+		return;
+	}
+
+	$tools_table = $wpdb->prefix . 'sflmcp_tools';
+	if ( ! stifli_flex_mcp_table_exists( $tools_table ) ) {
+		return;
+	}
+
+	$now = current_time( 'mysql', true );
+	$new_tools = array(
+		array( 'cf7_list_forms', 'List Contact Form 7 forms with status, dates, and field counts. Requires Contact Form 7.', 'Plugins - Forms', 1 ),
+		array( 'cf7_get_form', 'Get a Contact Form 7 form with its normalized field schema. Requires Contact Form 7.', 'Plugins - Forms', 1 ),
+		array( 'flamingo_get_submissions', 'Read redacted Contact Form 7 submissions stored by Flamingo. Requires Contact Form 7 and Flamingo.', 'Plugins - Forms', 1 ),
+	);
+
+	foreach ( $new_tools as $tool ) {
+		$exists = $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$tools_table} WHERE tool_name = %s", $tool[0] ) ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+		if ( ! $exists ) {
+			$wpdb->insert( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+				$tools_table,
+				array(
+					'tool_name' => $tool[0],
+					'tool_description' => $tool[1],
+					'category' => $tool[2],
+					'enabled' => $tool[3],
+					'created_at' => $now,
+					'updated_at' => $now,
+				),
+				array( '%s', '%s', '%s', '%d', '%s', '%s' )
+			);
+		}
+	}
+
+	update_option( $flag, '1' );
+}
+
+/**
  * Upgrade routine: add Google Search Console SEO tools for existing installs.
  */
 function stifli_flex_mcp_upgrade_gsc_tools() {
@@ -2304,6 +2641,25 @@ function stifli_flex_mcp_upgrade_rankmath_profile_detach() {
 	update_option( $flag, '1' );
 }
 
+function stifli_flex_mcp_compact_profile_tools() {
+	return array( 'mcp_ping', 'wp_get_posts', 'wp_get_post', 'wp_create_post', 'wp_update_post', 'wp_get_pages', 'wp_get_media', 'wp_get_media_item', 'wp_get_terms', 'wp_get_nav_menus', 'wp_create_preview_link', 'wp_verify_rendered_page' );
+}
+
+function stifli_flex_mcp_upgrade_360() {
+	global $wpdb;
+	$tools_table = $wpdb->prefix . 'sflmcp_tools';
+	$exists = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$tools_table} WHERE tool_name = %s", 'wp_verify_rendered_page' ) );
+	if ( ! $exists ) {
+		$now = current_time( 'mysql', true );
+		$inserted = $wpdb->insert( $tools_table, array( 'tool_name' => 'wp_verify_rendered_page', 'tool_description' => 'Verify public page HTML after edits without executing JavaScript.', 'category' => 'WordPress - Posts', 'enabled' => 0, 'created_at' => $now, 'updated_at' => $now ), array( '%s', '%s', '%s', '%d', '%s', '%s' ) );
+		if ( false === $inserted ) {
+			return false;
+		}
+	}
+	stifli_flex_mcp_seed_system_profiles();
+	return true;
+}
+
 function stifli_flex_mcp_seed_system_profiles() {
 	global $wpdb;
 	$profiles_table = $wpdb->prefix . 'sflmcp_profiles';
@@ -2323,6 +2679,11 @@ function stifli_flex_mcp_seed_system_profiles() {
 	// Define system profiles with their tools
 	$system_profiles = array(
 		array(
+			'name' => 'Compact Site',
+			'description' => 'Twelve editorial tools for context-limited clients. Includes post editing and public HTML verification.',
+			'tools' => stifli_flex_mcp_compact_profile_tools(),
+		),
+		array(
 			'name' => 'WordPress Read Only',
 			'description' => 'WordPress read-only tools without write operations or sensitive data',
 			'tools' => array(
@@ -2330,6 +2691,7 @@ function stifli_flex_mcp_seed_system_profiles() {
 				'mcp_ping',
 				// Posts
 				'wp_get_posts', 'wp_get_post',
+				'wp_verify_rendered_page',
 				// Pages
 				'wp_get_pages',
 				// Comments
@@ -2361,6 +2723,8 @@ function stifli_flex_mcp_seed_system_profiles() {
 				'mcp_ping',
 				// Posts (6)
 				'wp_get_posts', 'wp_get_post', 'wp_create_post', 'wp_update_post', 'wp_delete_post', 'wp_set_featured_image',
+				'wp_publish_and_promote', 'wp_create_preview_link',
+				'wp_verify_rendered_page',
 				// Pages (4)
 				'wp_get_pages', 'wp_create_page', 'wp_update_page', 'wp_delete_page',
 				// Comments (4)
@@ -2374,7 +2738,7 @@ function stifli_flex_mcp_seed_system_profiles() {
 				// Themes (1) - Removed: wp_install_theme, wp_switch_theme
 				'wp_get_themes',
 				// Media (6)
-				'wp_get_media', 'wp_get_media_item', 'wp_upload_image_from_url', 'wp_upload_image', 'wp_update_media_item', 'wp_delete_media_item',
+				'wp_get_media', 'wp_get_media_item', 'wp_upload_image_from_url', 'wp_upload_image', 'wp_upload_media', 'wp_update_media_item', 'wp_delete_media_item',
 				// Taxonomies (4)
 				'wp_get_taxonomies', 'wp_get_terms', 'wp_create_term', 'wp_update_term', 'wp_delete_term',
 				// Term meta (3)
@@ -2384,7 +2748,7 @@ function stifli_flex_mcp_seed_system_profiles() {
 				// Tags (4)
 				'wp_get_tags', 'wp_create_tag', 'wp_update_tag', 'wp_delete_tag',
 				// Menus (4)
-				'wp_get_nav_menus', 'wp_get_menus', 'wp_get_menu', 'wp_create_nav_menu', 'wp_reorder_menu_items',
+				'wp_get_nav_menus', 'wp_get_menus', 'wp_get_menu', 'wp_create_nav_menu', 'wp_create_menu', 'wp_reorder_menu_items',
 				// Options (3)
 				'wp_css_get_global', 'wp_css_set_global', 'wp_css_set_scoped',
 				'wp_get_option', 'wp_get_plugin_settings', 'wp_update_option',
@@ -2413,7 +2777,7 @@ function stifli_flex_mcp_seed_system_profiles() {
 				'mcp_ping',
 				'wc_get_products', 'wc_get_product_variations', 'wc_get_variation', 'wc_get_product_categories', 'wc_get_product_tags', 'wc_get_product_reviews',
 				'wc_get_product_attributes', 'wc_get_attribute_terms',
-				'wc_get_orders', 'wc_get_order_notes',
+				'wc_get_orders', 'wc_get_order', 'wc_get_order_notes',
 				// Removed for WordPress.org compliance: wc_get_customers
 				'wc_get_coupons', 'wc_get_coupon', 'wc_get_coupon_count',
 				'wc_get_low_stock_products',
@@ -2436,7 +2800,7 @@ function stifli_flex_mcp_seed_system_profiles() {
 				'wc_get_product_tags', 'wc_create_product_tag', 'wc_update_product_tag', 'wc_delete_product_tag',
 				'wc_get_product_reviews', 'wc_create_product_review', 'wc_update_product_review', 'wc_delete_product_review',
 				// Orders & Refunds
-				'wc_get_orders', 'wc_create_order', 'wc_update_order', 'wc_delete_order', 'wc_batch_update_orders',
+				'wc_get_orders', 'wc_get_order', 'wc_create_order', 'wc_update_order', 'wc_delete_order', 'wc_batch_update_orders',
 				'wc_get_order_notes', 'wc_create_order_note', 'wc_delete_order_note',
 				'wc_create_refund', 'wc_get_refunds', 'wc_delete_refund',
 				// Coupons (Customers removed for WordPress.org compliance)
@@ -2459,7 +2823,7 @@ function stifli_flex_mcp_seed_system_profiles() {
 				'wc_get_product_tags', 'wc_create_product_tag', 'wc_update_product_tag', 'wc_delete_product_tag',
 				'wc_get_product_reviews', 'wc_create_product_review', 'wc_update_product_review', 'wc_delete_product_review',
 				'wc_update_stock', 'wc_get_low_stock_products', 'wc_set_stock_status',
-				'wc_get_orders', 'wc_create_order', 'wc_update_order', 'wc_delete_order', 'wc_batch_update_orders',
+				'wc_get_orders', 'wc_get_order', 'wc_create_order', 'wc_update_order', 'wc_delete_order', 'wc_batch_update_orders',
 				'wc_get_order_notes', 'wc_create_order_note', 'wc_delete_order_note',
 				'wc_create_refund', 'wc_get_refunds', 'wc_delete_refund',
 				// Customers removed for WordPress.org compliance
@@ -2503,7 +2867,7 @@ function stifli_flex_mcp_seed_system_profiles() {
 				'wc_get_product_attributes', 'wc_get_attribute_terms',
 				'wc_get_product_categories', 'wc_get_product_tags',
 				'wc_get_product_reviews',
-				'wc_get_orders', 'wc_get_order_notes',
+				'wc_get_orders', 'wc_get_order', 'wc_get_order_notes',
 				// Removed for WordPress.org compliance: wc_get_customers
 				'wc_get_coupons', 'wc_get_coupon', 'wc_get_coupon_count',
 				'wc_get_low_stock_products',
@@ -4196,31 +4560,65 @@ function stifli_flex_mcp_run_automation_tasks() {
 	}
 }
 
+function stifli_flex_mcp_get_schema_upgrade_backoff_key() {
+	return 'sflmcp_schema_backoff_' . md5( SFLMCP_DB_VERSION );
+}
+
 function stifli_flex_mcp_install_schema() {
-	stifli_flex_mcp_maybe_create_queue_table();
-	stifli_flex_mcp_maybe_create_tools_table();
-	stifli_flex_mcp_maybe_add_tools_token_column();
-	stifli_flex_mcp_maybe_create_abilities_table();
-	stifli_flex_mcp_maybe_create_profiles_table();
-	stifli_flex_mcp_maybe_create_profile_tools_table();
+	$backoff_key = stifli_flex_mcp_get_schema_upgrade_backoff_key();
+	if ( false !== get_transient( $backoff_key ) ) {
+		return false;
+	}
+
+	global $wpdb;
+	$schema_errors = array();
+	$run_schema_step = function( $callback ) use ( $wpdb, &$schema_errors ) {
+		$wpdb->last_error = '';
+		call_user_func( $callback );
+		if ( '' !== (string) $wpdb->last_error ) {
+			$schema_errors[] = (string) $wpdb->last_error;
+		}
+	};
+
+	$run_schema_step( 'stifli_flex_mcp_maybe_create_queue_table' );
+	$run_schema_step( 'stifli_flex_mcp_maybe_create_tools_table' );
+	$run_schema_step( 'stifli_flex_mcp_maybe_add_tools_token_column' );
+	$run_schema_step( 'stifli_flex_mcp_maybe_create_abilities_table' );
+	$run_schema_step( 'stifli_flex_mcp_maybe_create_profiles_table' );
+	$run_schema_step( 'stifli_flex_mcp_maybe_create_profile_tools_table' );
 
 	if ( stifli_flex_mcp_addon_enabled( 'automations' ) ) {
-		stifli_flex_mcp_maybe_create_automation_tasks_table();
-		stifli_flex_mcp_maybe_create_automation_logs_table();
-		stifli_flex_mcp_maybe_create_automation_templates_table();
-		stifli_flex_mcp_maybe_create_event_triggers_table();
-		stifli_flex_mcp_maybe_create_event_automations_table();
-		stifli_flex_mcp_maybe_create_event_logs_table();
+		$run_schema_step( 'stifli_flex_mcp_maybe_create_automation_tasks_table' );
+		$run_schema_step( 'stifli_flex_mcp_maybe_create_automation_logs_table' );
+		$run_schema_step( 'stifli_flex_mcp_maybe_create_automation_templates_table' );
+		$run_schema_step( 'stifli_flex_mcp_maybe_create_event_triggers_table' );
+		$run_schema_step( 'stifli_flex_mcp_maybe_create_event_automations_table' );
+		$run_schema_step( 'stifli_flex_mcp_maybe_create_event_logs_table' );
 	}
 
 	if ( class_exists( 'StifliFlexMcp_ChangeTracker' ) ) {
-		StifliFlexMcp_ChangeTracker::createTable();
-		StifliFlexMcp_ChangeTracker::migrateAddSourceColumns();
+		$run_schema_step( array( 'StifliFlexMcp_ChangeTracker', 'createTable' ) );
+		$run_schema_step( array( 'StifliFlexMcp_ChangeTracker', 'migrateAddSourceColumns' ) );
 	}
 
 	if ( class_exists( 'StifliFlexMcp_OAuth_Storage' ) ) {
-		StifliFlexMcp_OAuth_Storage::create_tables();
+		$run_schema_step( array( 'StifliFlexMcp_OAuth_Storage', 'create_tables' ) );
 	}
+
+	if ( ! empty( $schema_errors ) ) {
+		$retry_delay = (int) apply_filters( 'sflmcp_schema_upgrade_retry_delay', DAY_IN_SECONDS, $schema_errors );
+		$retry_delay = max( MINUTE_IN_SECONDS, $retry_delay );
+		set_transient( $backoff_key, time() + $retry_delay, $retry_delay );
+		$error_message = sanitize_text_field( reset( $schema_errors ) );
+		stifli_flex_mcp_log(
+			'Database schema upgrade failed; automatic retries paused for ' . $retry_delay . ' seconds. Error: ' . $error_message,
+			array( '_force' => true )
+		);
+		return false;
+	}
+
+	delete_transient( $backoff_key );
+	return true;
 }
 
 register_activation_hook(__FILE__, 'stifli_flex_mcp_activate');
@@ -4228,19 +4626,27 @@ register_deactivation_hook(__FILE__, 'stifli_flex_mcp_deactivate');
 
 function stifli_flex_mcp_activate() {
 	StifliFlexMcp_Addons::initialize_fresh_install();
-	stifli_flex_mcp_install_schema();
-	if ( stifli_flex_mcp_addon_enabled( 'automations' ) ) {
-		stifli_flex_mcp_seed_event_triggers();
+	delete_transient( stifli_flex_mcp_get_schema_upgrade_backoff_key() );
+	$schema_ready = stifli_flex_mcp_install_schema();
+	if ( $schema_ready ) {
+		if ( stifli_flex_mcp_addon_enabled( 'automations' ) ) {
+			stifli_flex_mcp_seed_event_triggers();
+		}
+
+		stifli_flex_mcp_seed_initial_tools();
+		stifli_flex_mcp_seed_system_profiles();
+		stifli_flex_mcp_maybe_upgrade_db();
+		stifli_flex_mcp_upgrade_elementor_integration_tools();
+		stifli_flex_mcp_upgrade_3311_seed_elementor_add_widget_tool();
+		stifli_flex_mcp_upgrade_wave1_tools();
+		stifli_flex_mcp_upgrade_349_seed_order_detail_tool();
+		stifli_flex_mcp_upgrade_350_seed_divi_editorial_tools();
+		stifli_flex_mcp_upgrade_351_seed_builder_fidelity_tools();
+		stifli_flex_mcp_upgrade_352_seed_reliability_tools();
+		stifli_flex_mcp_upgrade_354_seed_cf7_tools();
+		stifli_flex_mcp_upgrade_gsc_tools();
+		stifli_flex_mcp_sync_tool_token_estimates();
 	}
-	
-	stifli_flex_mcp_seed_initial_tools();
-	stifli_flex_mcp_seed_system_profiles();
-	stifli_flex_mcp_maybe_upgrade_db();
-	stifli_flex_mcp_upgrade_elementor_integration_tools();
-	stifli_flex_mcp_upgrade_3311_seed_elementor_add_widget_tool();
-	stifli_flex_mcp_upgrade_wave1_tools();
-	stifli_flex_mcp_upgrade_gsc_tools();
-	stifli_flex_mcp_sync_tool_token_estimates();
 	stifli_flex_mcp_ensure_clean_queue_event();
 	stifli_flex_mcp_ensure_clean_changelog_event();
 	if ( stifli_flex_mcp_addon_enabled( 'automations' ) ) {
@@ -4270,6 +4676,7 @@ function stifli_flex_mcp_clean_queue() {
 	);
 
 	// Also clean expired OAuth codes and tokens.
+	StifliFlexMcpUtils::pruneProtocolUsage();
 	if ( class_exists( 'StifliFlexMcp_OAuth_Storage' ) ) {
 		StifliFlexMcp_OAuth_Storage::get_instance()->cleanup_expired();
 	}
@@ -4399,27 +4806,33 @@ add_action('plugins_loaded', function() {
 	global $stifli_flex_mcp_instance;
 	global $stifliFlexMcp;
 
-	stifli_flex_mcp_install_schema();
-	
-	if ( stifli_flex_mcp_addon_enabled( 'automations' ) ) {
-		stifli_flex_mcp_seed_event_triggers();
+	$schema_ready = stifli_flex_mcp_install_schema();
+	if ( $schema_ready ) {
+		if ( stifli_flex_mcp_addon_enabled( 'automations' ) ) {
+			stifli_flex_mcp_seed_event_triggers();
+		}
+		stifli_flex_mcp_seed_initial_tools();
+		stifli_flex_mcp_seed_system_profiles();
+		stifli_flex_mcp_upgrade_302();
+		stifli_flex_mcp_upgrade_remove_core_elementor_tools();
+		stifli_flex_mcp_upgrade_rankmath_tools();
+		stifli_flex_mcp_upgrade_plugin_integration_tools();
+		stifli_flex_mcp_upgrade_elementor_integration_tools();
+		stifli_flex_mcp_upgrade_3311_seed_elementor_add_widget_tool();
+		stifli_flex_mcp_upgrade_wave1_tools();
+		stifli_flex_mcp_upgrade_349_seed_order_detail_tool();
+		stifli_flex_mcp_upgrade_350_seed_divi_editorial_tools();
+		stifli_flex_mcp_upgrade_351_seed_builder_fidelity_tools();
+		stifli_flex_mcp_upgrade_352_seed_reliability_tools();
+		stifli_flex_mcp_upgrade_354_seed_cf7_tools();
+		stifli_flex_mcp_upgrade_gsc_tools();
+		stifli_flex_mcp_upgrade_rankmath_profile_detach();
+		stifli_flex_mcp_apply_plugin_integration_overrides();
+		stifli_flex_mcp_sync_tool_token_estimates();
+		// Centralized DB-version-driven upgrade hook (must run after seeds).
+		stifli_flex_mcp_maybe_upgrade_db();
 	}
-	stifli_flex_mcp_seed_initial_tools();
-	stifli_flex_mcp_seed_system_profiles();
-	stifli_flex_mcp_upgrade_302();
-	stifli_flex_mcp_upgrade_remove_core_elementor_tools();
-	stifli_flex_mcp_upgrade_rankmath_tools();
-	stifli_flex_mcp_upgrade_plugin_integration_tools();
-	stifli_flex_mcp_upgrade_elementor_integration_tools();
-	stifli_flex_mcp_upgrade_3311_seed_elementor_add_widget_tool();
-	stifli_flex_mcp_upgrade_wave1_tools();
-	stifli_flex_mcp_upgrade_gsc_tools();
-	stifli_flex_mcp_upgrade_rankmath_profile_detach();
-	stifli_flex_mcp_apply_plugin_integration_overrides();
-	stifli_flex_mcp_sync_tool_token_estimates();
 	stifli_flex_mcp_ensure_clean_queue_event();
-	// Centralized DB-version-driven upgrade hook (must run after seeds).
-	stifli_flex_mcp_maybe_upgrade_db();
 	if (class_exists('StifliFlexMcp')) {
 		$stifli_flex_mcp_instance = new StifliFlexMcp();
 		$stifli_flex_mcp_instance->init();

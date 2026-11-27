@@ -1,5 +1,6 @@
 <?php
 if ( ! defined( 'ABSPATH' ) ) exit; // Exit if accessed directly
+require_once __DIR__ . '/media/class-upload-media.php';
 
 // Model MCP con tools completas + intención/consentimiento
 class StifliFlexMcpModel {
@@ -78,6 +79,40 @@ class StifliFlexMcpModel {
         }
 
         return $this->maybeLoadFile( 'integrations/class-elementor.php', 'StifliFlexMcp_Elementor' );
+    }
+
+    private function isDiviRuntimeAvailable() {
+        if ( class_exists( 'StifliFlexMcp_Divi' ) ) {
+            return StifliFlexMcp_Divi::isAvailable();
+        }
+
+        $theme = wp_get_theme();
+        $template = strtolower( (string) $theme->get_template() );
+        $stylesheet = strtolower( (string) $theme->get_stylesheet() );
+        return defined( 'ET_BUILDER_VERSION' )
+            || class_exists( 'ET_Builder_Plugin' )
+            || in_array( $template, array( 'divi', 'extra' ), true )
+            || in_array( $stylesheet, array( 'divi', 'extra' ), true )
+            || $this->isPluginMarkedActive( 'divi-builder/divi-builder.php' );
+    }
+
+    private function maybeLoadDiviIntegrationModule() {
+        if ( class_exists( 'StifliFlexMcp_Divi' ) ) {
+            return true;
+        }
+        return $this->maybeLoadFile( 'integrations/class-divi.php', 'StifliFlexMcp_Divi' );
+    }
+
+    private function maybeLoadContactForm7IntegrationModule() {
+        if ( class_exists( 'StifliFlexMcp_ContactForm7' ) ) {
+            return true;
+        }
+
+        if ( ! class_exists( 'WPCF7_ContactForm' ) || ! post_type_exists( 'wpcf7_contact_form' ) ) {
+            return false;
+        }
+
+        return $this->maybeLoadFile( 'integrations/class-contact-form-7.php', 'StifliFlexMcp_ContactForm7' );
     }
 
     private function maybeLoadGoogleSearchConsoleModule() {
@@ -214,15 +249,27 @@ class StifliFlexMcpModel {
      * Clasificación de intención y confirmación por tool.
      */
     public function getIntentForTool(string $name): array {
+        $metadata = $this->getToolMetadata( $name );
+        return array( 'intent' => $metadata['intent'], 'requires_confirmation' => $metadata['requires_confirmation'] );
+    }
+
+    public function getToolMetadata( string $name, array $definition = array() ): array {
+        if ( 0 === strpos( $name, 'ability_' ) || isset( $definition['_ability_name'] ) ) {
+            return $this->getAbilityToolMetadata( $name, $definition );
+        }
         // Escritura/mutación
         $WRITE = array(
             'wp_create_post','wp_update_post','wp_delete_post',
+            'wp_publish_and_promote','wp_create_preview_link',
             'wp_set_featured_image',
             'wp_tec_save_event','wp_tec_save_entity','wp_tec_trash_event',
             'wp_create_comment','wp_update_comment','wp_delete_comment',
             'wp_rm_update_post_seo',
             // Yoast SEO write
             'yoast_set_meta',
+            'yoast_reindex',
+            // fetch accepts arbitrary HTTP methods, not just GET/HEAD.
+            'fetch',
             // SEO optimization write
             'wp_seo_apply_title_meta_safe',
             // ACF write
@@ -232,17 +279,19 @@ class StifliFlexMcpModel {
             // Removed for WordPress.org compliance: wp_create_user, wp_update_user, wp_delete_user
             'wp_upload_image_from_url',
             'wp_upload_image',
+            'wp_upload_media',
             'wp_generate_image',
             'wp_generate_video',
             // Removed: wp_activate_plugin, wp_deactivate_plugin, wp_install_plugin, wp_install_theme, wp_switch_theme (WordPress.org compliance)
             'wp_update_option',
+			'wp_update_permalink_structure',
             'wp_css_set_global',
             'wp_css_set_scoped',
             'wp_add_post_meta','wp_update_post_meta','wp_delete_post_meta',
             'wp_create_term','wp_delete_term',
             'wp_update_term',
             'wp_update_term_meta','wp_delete_term_meta',
-            'wp_create_nav_menu','wp_add_nav_menu_item','wp_update_nav_menu_item','wp_delete_nav_menu_item','wp_delete_nav_menu',
+            'wp_create_nav_menu','wp_create_menu','wp_add_nav_menu_item','wp_update_nav_menu_item','wp_delete_nav_menu_item','wp_delete_nav_menu',
             'wp_reorder_menu_items',
             'wp_create_page','wp_update_page','wp_delete_page',
             'wp_create_category','wp_update_category','wp_delete_category',
@@ -254,6 +303,7 @@ class StifliFlexMcpModel {
             'wp_restore_post_revision',
             // WooCommerce write operations
             'wc_create_product','wc_update_product','wc_delete_product','wc_batch_update_products',
+            'wc_bulk_assign_product_categories','wc_bulk_delete_products',
             'wc_create_product_variation','wc_update_product_variation','wc_delete_product_variation','wc_batch_update_variations',
             'wc_create_product_attribute','wc_set_product_attributes',
             'wc_create_product_category','wc_update_product_category','wc_delete_product_category',
@@ -277,7 +327,11 @@ class StifliFlexMcpModel {
             'snippet_activate','snippet_deactivate',
             // Elementor write operations
             'elementor_clone_page','elementor_replace_text','elementor_replace_image',
-            'elementor_replace_link','elementor_import_template',
+            'elementor_replace_link','elementor_import_template','elementor_apply_template_to_page',
+            'elementor_repair_render','elementor_repair_render_bulk',
+            'elementor_update_widget','elementor_add_widget',
+            // Divi write operations
+            'divi_replace_text','divi_clone_page','divi_replace_image','divi_apply_library_template',
             // Changelog write operations
             'mcp_rollback_change','mcp_redo_change','mcp_rollback_session',
             
@@ -293,31 +347,39 @@ class StifliFlexMcpModel {
             'wp_rm_get_post_seo',
             // Yoast SEO reads
             'yoast_get_meta',
-            'yoast_reindex',
+            'yoast_get_schema',
             // ACF reads
             'acf_get_field_groups',
             'acf_get_fields',
             // WPForms reads
             'wpforms_list_forms',
+            'wpforms_get_form',
             'wpforms_get_entries',
+            'wpforms_get_entry',
             // Gravity Forms reads
             'gf_list_forms',
             'gf_get_entries',
             // Forminator reads
             'forminator_list_forms',
             'forminator_get_entries',
-            'fetch',                // red externa: tratar como lectura sensible
+            // Contact Form 7 and Flamingo reads
+            'cf7_list_forms',
+            'cf7_get_form',
+            'flamingo_get_submissions',
             // WordPress - Additional sensitive reads
             'wp_get_user_meta',     // user privacy data
-            'wp_get_site_health',   // system information
             'wp_get_cron_schedule', // scheduled tasks visibility
             'wp_get_error_log_tail', // debug log inspection
+            'wp_get_site_health',   // diagnostic report, including external connectivity probes
             'wp_get_term_meta',     // may include private/encoded data
             // WooCommerce sensitive reads (wc_get_customers removed for WordPress.org compliance)
             'wc_get_orders',        // order data privacy
+            'wc_get_order',         // full order includes customer addresses and payment method
             'wc_get_order_notes',   // order notes may contain sensitive info
             'wc_get_system_status', // system information
             'wc_get_settings',      // WooCommerce settings
+            'wc_get_refunds','wc_get_sales_report','wc_get_top_sellers_report',
+            'wc_get_webhooks',
             // Snippet sensitive reads (code content)
             'snippet_list','snippet_get',
             // Changelog sensitive reads
@@ -328,13 +390,113 @@ class StifliFlexMcpModel {
             'wp_seo_get_post_context','wp_seo_suggest_title_meta_from_gsc'
         );
 
-        if (in_array($name, $WRITE, true)) {
-            return array('intent' => 'write', 'requires_confirmation' => true);
+        $READ = array(
+            'mcp_ping', 'search', 'wp_verify_rendered_page', 'wp_search_image',
+            'wp_get_posts', 'wp_get_post', 'wp_get_pages', 'wp_get_comments', 'wp_get_users',
+            'wp_get_media', 'wp_get_media_item', 'wp_list_plugins', 'wp_get_themes',
+            'wp_get_taxonomies', 'wp_get_terms', 'wp_get_categories', 'wp_get_tags',
+            'wp_get_nav_menus', 'wp_get_menus', 'wp_get_menu', 'wp_css_get_global',
+            'wp_get_post_revisions', 'wp_get_post_types',
+            'wp_tec_list_events', 'wp_tec_get_event', 'wp_tec_list_entities',
+            'elementor_get_page_outline', 'elementor_get_widget_settings',
+            'elementor_list_local_templates', 'elementor_export_template',
+            'divi_get_page_format', 'divi_get_page_outline', 'divi_validate_layout',
+            'divi_list_local_templates', 'divi_library_get',
+            'wc_get_products', 'wc_get_product_variations', 'wc_get_variation',
+            'wc_get_product_attributes', 'wc_get_attribute_terms', 'wc_get_product_categories',
+            'wc_get_product_tags', 'wc_get_product_reviews', 'wc_get_low_stock_products',
+            'wc_get_coupons', 'wc_get_coupon', 'wc_get_coupon_count',
+            'wc_get_tax_classes', 'wc_get_tax_rates', 'wc_get_shipping_zones',
+            'wc_get_shipping_zone_methods', 'wc_get_payment_gateways',
+        );
+
+        // These operations only add objects. Mixed create/update and replacement tools are excluded.
+        $ADDITIVE = array(
+            'wp_create_post', 'wp_create_page', 'wp_create_comment', 'wp_create_preview_link',
+            'wp_upload_image', 'wp_upload_image_from_url', 'wp_upload_media',
+            'wp_generate_image', 'wp_generate_video', 'wp_add_post_meta',
+            'wp_create_term', 'wp_create_category', 'wp_create_tag', 'wp_add_nav_menu_item',
+            'wc_create_product', 'wc_create_product_variation', 'wc_create_product_attribute',
+            'wc_create_product_category', 'wc_create_product_tag', 'wc_create_product_review',
+            'wc_create_coupon', 'wc_create_tax_rate', 'wc_create_shipping_zone',
+            'wc_create_order_note', 'elementor_clone_page', 'elementor_import_template', 'divi_clone_page',
+        );
+        $OPEN_WORLD = array(
+            'fetch', 'mcp_ping', 'wp_verify_rendered_page', 'wp_get_site_health', 'wp_rm_get_head',
+            'wp_search_image', 'wp_upload_image', 'wp_upload_image_from_url', 'wp_upload_media',
+            'wp_generate_image', 'wp_generate_video', 'wp_create_comment', 'wp_update_comment',
+            // Publishing content can schedule pingbacks and update-service notifications.
+            'wp_create_post', 'wp_update_post', 'wp_publish_and_promote',
+            'wp_create_page', 'wp_update_page', 'wp_restore_post_revision',
+            'elementor_clone_page', 'divi_clone_page',
+            'wp_gsc_list_sites', 'wp_gsc_query_performance', 'wp_gsc_inspect_url',
+            'wp_gsc_list_sitemaps', 'wp_seo_find_gsc_opportunities',
+            'wp_seo_get_post_context', 'wp_seo_suggest_title_meta_from_gsc',
+            // Order transitions, customer notes and refunds can trigger customer notifications.
+            'wc_create_order', 'wc_update_order', 'wc_delete_order', 'wc_batch_update_orders',
+            'wc_create_order_note', 'wc_create_refund', 'wc_delete_refund',
+            'wc_create_webhook', 'wc_update_webhook', 'wc_delete_webhook',
+            // Stored code and arbitrary replayed operations can interact with external systems.
+            'snippet_create', 'snippet_update', 'snippet_delete', 'snippet_activate', 'snippet_deactivate',
+            'mcp_rollback_change', 'mcp_redo_change', 'mcp_rollback_session',
+        );
+
+        $read_only = in_array( $name, $READ, true ) || in_array( $name, $SENSITIVE_READ, true );
+        $known = $read_only || in_array( $name, $WRITE, true );
+        if ( ! $known ) {
+            stifli_flex_mcp_log( 'Unclassified tool uses conservative MCP annotations: ' . $name );
         }
-        if (in_array($name, $SENSITIVE_READ, true)) {
-            return array('intent' => 'sensitive_read', 'requires_confirmation' => true);
+        $intent = $read_only ? ( in_array( $name, $SENSITIVE_READ, true ) ? 'sensitive_read' : 'read' ) : 'write';
+        return array(
+            'intent' => $intent,
+            'requires_confirmation' => 'read' !== $intent,
+            'annotations' => array(
+                'readOnlyHint' => $read_only,
+                'destructiveHint' => ! $read_only && ! in_array( $name, $ADDITIVE, true ),
+                // Mutations can create revisions, append data or run hooks; do not promise safe retries.
+                'idempotentHint' => $read_only,
+                'openWorldHint' => ! $known || in_array( $name, $OPEN_WORLD, true ),
+            ),
+        );
+    }
+
+    private function getAbilityToolMetadata( string $name, array $definition ): array {
+        if ( ! array_key_exists( '_ability_name', $definition ) ) {
+            $tools = $this->getTools();
+            $definition = isset( $tools[$name] ) && is_array( $tools[$name] ) ? $tools[$name] : array();
         }
-        return array('intent' => 'read', 'requires_confirmation' => false);
+        $annotations = array(
+            'readOnlyHint' => false, 'destructiveHint' => true,
+            'idempotentHint' => false, 'openWorldHint' => true,
+        );
+        $ability_name = StifliFlexMcpUtils::getArrayValue( $definition, '_ability_name', '' );
+        $ability = is_string( $ability_name ) && '' !== $ability_name && function_exists( 'stifli_flex_mcp_get_ability_safe' )
+            ? stifli_flex_mcp_get_ability_safe( $ability_name ) : null;
+        if ( is_object( $ability ) && method_exists( $ability, 'get_meta' ) ) {
+            $meta = $ability->get_meta();
+            $declared = is_array( $meta ) ? StifliFlexMcpUtils::getArrayValue( $meta, 'annotations', array() ) : array();
+            if ( ! is_array( $declared ) ) {
+                stifli_flex_mcp_log( 'Invalid Ability annotations for ' . $ability_name . '; using conservative hints.' );
+                $declared = array();
+            }
+            foreach ( array( 'readonly' => 'readOnlyHint', 'destructive' => 'destructiveHint', 'idempotent' => 'idempotentHint', 'openWorldHint' => 'openWorldHint' ) as $source => $target ) {
+                $value = StifliFlexMcpUtils::getArrayValue( $declared, $source, null );
+                if ( is_bool( $value ) ) {
+                    $annotations[$target] = $value;
+                } elseif ( null !== $value ) {
+                    stifli_flex_mcp_log( 'Invalid boolean Ability annotation ' . $source . ' for ' . $ability_name . '; using conservative default.' );
+                }
+            }
+        }
+        if ( $annotations['readOnlyHint'] ) {
+            $annotations['destructiveHint'] = false;
+            $annotations['idempotentHint'] = true;
+        }
+        return array(
+            'intent' => $annotations['readOnlyHint'] ? 'sensitive_read' : 'write',
+            'requires_confirmation' => true,
+            'annotations' => $annotations,
+        );
     }
 
     /**
@@ -374,17 +536,31 @@ class StifliFlexMcpModel {
         }
         
         // Filter tools by enabled status
+        $compact_tools = null;
+        if ( $table_exists && function_exists( 'stifli_flex_mcp_compact_profile_tools' ) ) {
+            $profiles_table = StifliFlexMcpUtils::getPrefixedTable( 'sflmcp_profiles', false );
+            $compact_active = $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$profiles_table} WHERE profile_name = %s AND is_active = 1 AND is_system = 1 LIMIT 1", 'Compact Site' ) );
+            if ( $compact_active ) {
+                $compact_tools = stifli_flex_mcp_compact_profile_tools();
+            }
+        }
         $filtered_tools = array();
         foreach ($tools as $tool) {
             $name = StifliFlexMcpUtils::getArrayValue($tool, 'name', '');
             if ('' === $name) {
                 continue;
             }
+			if ( is_array( $compact_tools ) && ! in_array( $name, $compact_tools, true ) ) {
+				continue;
+			}
 
             // Always emit a valid object schema for MCP clients.
             $tool['inputSchema'] = StifliFlexMcpUtils::normalizeToolInputSchema(
                 isset( $tool['inputSchema'] ) ? $tool['inputSchema'] : array()
             );
+			if ( isset( $tool['outputSchema'] ) ) {
+				$tool['outputSchema'] = StifliFlexMcpUtils::normalizeToolInputSchema( $tool['outputSchema'] );
+			}
 
             $allowed_by_integration = apply_filters('sflmcp_is_tool_enabled_for_integrations', true, $name, 'list', $tool);
             if (!$allowed_by_integration) {
@@ -411,9 +587,13 @@ class StifliFlexMcpModel {
                     $tool['category'] = isset($tool['category']) ? $tool['category'] : 'Core';
                 }
                 // Intención y consentimiento
-                $meta = $this->getIntentForTool($name);
+                $meta = $this->getToolMetadata( $name, $tool );
                 $tool['intent'] = $meta['intent']; // read | sensitive_read | write
                 $tool['requires_confirmation'] = $meta['requires_confirmation']; // bool
+                $tool['annotations'] = array_merge(
+                    isset( $tool['annotations'] ) && is_array( $tool['annotations'] ) ? $tool['annotations'] : array(),
+                    $meta['annotations']
+                );
                 if ($table_exists && !$is_ability) {
                     $tool['tokenEstimate'] = isset($enabled_tools[$name]) ? (int) $enabled_tools[$name] : StifliFlexMcpUtils::estimateToolTokenUsage($tool);
                 } else {
@@ -434,6 +614,22 @@ class StifliFlexMcpModel {
         if (empty($this->tools)) {
             $tools = array(
                 // Diagnóstico
+                'wp_verify_rendered_page' => array(
+                    'name' => 'wp_verify_rendered_page',
+                    'description' => 'Verify public server-rendered HTML on this site after an edit: HTTP status, title, canonical, description and expected text. Does not execute JavaScript, send cookies or follow redirects. Use the final public URL without query parameters.',
+                    'inputSchema' => array(
+                        'type' => 'object',
+                        'properties' => array(
+                            'url' => array('type' => 'string', 'maxLength' => 2048),
+                            'expected_status' => array('type' => 'integer', 'minimum' => 100, 'maximum' => 599),
+                            'expected_title' => array('type' => 'string'),
+                            'expected_canonical' => array('type' => 'string'),
+                            'expected_description' => array('type' => 'string'),
+                            'expected_text' => array('type' => 'array', 'maxItems' => 20, 'items' => array('type' => 'string', 'minLength' => 1, 'maxLength' => 2000)),
+                        ),
+                        'required' => array('url'),
+                    ),
+                ),
                 'mcp_ping' => array(
                     'name' => 'mcp_ping',
                     'description' => 'Connectivity check with optional lightweight diagnostics. Returns the current GMT time, site info, and optional DNS/reachability details.',
@@ -444,6 +640,23 @@ class StifliFlexMcpModel {
                             'timeout_sec' => array('type' => 'integer'),
                         ),
                         'required' => array(),
+                    ),
+                    'outputSchema' => array(
+                        'type' => 'object',
+                        'properties' => array(
+                            'time' => array( 'type' => 'string' ),
+                            'name' => array( 'type' => 'string' ),
+                            'home_url' => array( 'type' => 'string' ),
+                            'rest_url' => array( 'type' => 'string' ),
+                            'https' => array( 'type' => 'boolean' ),
+                            'wordpress_version' => array( 'type' => 'string' ),
+                            'php_version' => array( 'type' => 'string' ),
+                            'connection_context' => array( 'type' => 'object', 'properties' => array(), 'additionalProperties' => true ),
+                            'builder_versions' => array( 'type' => 'object', 'properties' => array(), 'additionalProperties' => true ),
+                            'diagnostics' => array( 'type' => 'object', 'properties' => array(), 'additionalProperties' => true ),
+                        ),
+                        'required' => array( 'time', 'name', 'home_url', 'rest_url', 'https', 'wordpress_version', 'php_version', 'connection_context', 'builder_versions' ),
+                        'additionalProperties' => false,
                     ),
                 ),
 
@@ -469,6 +682,18 @@ class StifliFlexMcpModel {
                         ),
                         'required' => array(),
                     ),
+                    'outputSchema' => array(
+                        'type' => 'object',
+                        'properties' => array(
+                            'items' => array(
+                                'type' => 'array',
+                                'items' => array( 'type' => 'object', 'properties' => array(), 'additionalProperties' => true ),
+                            ),
+                            'pagination' => array( 'type' => 'object', 'properties' => array(), 'additionalProperties' => true ),
+                        ),
+                        'required' => array( 'items' ),
+                        'additionalProperties' => false,
+                    ),
                 ),
                 'wp_get_post' => array(
                     'name' => 'wp_get_post',
@@ -484,6 +709,27 @@ class StifliFlexMcpModel {
                             'include_taxonomies' => array('type' => 'boolean'),
                         ),
                         'required' => array(),
+                    ),
+                    'outputSchema' => array(
+                        'type' => 'object',
+                        'properties' => array(
+                            'ID' => array( 'type' => 'integer' ),
+                            'post_type' => array( 'type' => 'string' ),
+                            'post_title' => array( 'type' => 'string' ),
+                            'post_status' => array( 'type' => 'string' ),
+                            'post_content' => array( 'type' => 'string' ),
+                            'post_excerpt' => array( 'type' => 'string' ),
+                            'permalink' => array( 'type' => 'string' ),
+                            'post_date' => array( 'type' => 'string' ),
+                            'post_modified' => array( 'type' => 'string' ),
+                            'author' => array( 'type' => 'object', 'properties' => array(), 'additionalProperties' => true ),
+                            'featured_media' => array( 'type' => array( 'object', 'null' ), 'properties' => array(), 'additionalProperties' => true ),
+                            'featured_media_id' => array( 'type' => 'integer' ),
+                            'featured_media_url' => array( 'type' => 'string' ),
+                            'taxonomies' => array( 'type' => 'object', 'properties' => array(), 'additionalProperties' => true ),
+                        ),
+                        'required' => array( 'ID', 'post_type', 'post_title', 'post_status', 'post_content', 'post_excerpt', 'permalink', 'post_date', 'post_modified' ),
+                        'additionalProperties' => false,
                     ),
                 ),
 
@@ -530,14 +776,42 @@ class StifliFlexMcpModel {
                         'required' => array(),
                     ),
                 ),
+                'wp_publish_and_promote' => array(
+                    'name' => 'wp_publish_and_promote',
+                    'description' => 'Publish an editable draft and add it to a navigation menu in one operation. If menu insertion fails, the original post status is restored.',
+                    'inputSchema' => array(
+                        'type' => 'object',
+                        'properties' => array(
+                            'post_id' => array('type' => 'integer'),
+                            'menu_id' => array('type' => 'integer'),
+                            'menu_location' => array('type' => 'string'),
+                            'menu_item_title' => array('type' => 'string'),
+                            'menu_item_parent_id' => array('type' => 'integer'),
+                        ),
+                        'required' => array('post_id'),
+                    ),
+                ),
+                'wp_create_preview_link' => array(
+                    'name' => 'wp_create_preview_link',
+                    'description' => 'Create a cryptographically random, temporary shareable preview link for a draft, pending, or scheduled post.',
+                    'inputSchema' => array(
+                        'type' => 'object',
+                        'properties' => array(
+                            'post_id' => array('type' => 'integer'),
+                            'ttl_minutes' => array('type' => 'integer', 'description' => 'Lifetime from 5 minutes to 7 days. Default 60.'),
+                        ),
+                        'required' => array('post_id'),
+                    ),
+                ),
                 'wp_set_featured_image' => array(
                     'name' => 'wp_set_featured_image',
-                    'description' => 'Set or remove the featured image (post thumbnail) of a post. Pass attachment_id=0 to remove.',
+                    'description' => 'Set or remove the featured image of a post and optionally update its media-library alt text. Pass attachment_id=0 to remove.',
                     'inputSchema' => array(
                         'type' => 'object',
                         'properties' => array(
                             'post_id'       => array('type' => 'integer'),
                             'attachment_id' => array('type' => 'integer', 'description' => 'Attachment post ID. Use 0 to clear the featured image.'),
+                            'alt_text'      => array('type' => 'string', 'description' => 'Optional accessible alternative text for the attachment.'),
                         ),
                         'required' => array('post_id', 'attachment_id'),
                     ),
@@ -681,17 +955,19 @@ class StifliFlexMcpModel {
                 ),
                 'wp_upload_image' => array(
                     'name' => 'wp_upload_image',
-                    'description' => 'Upload an image from base64 data and create a media attachment. Useful for AI-generated images. Accepts raw base64 or data URL (data:image/png;base64,...). Returns attachment ID and URL.',
+                    'description' => 'Upload an image attached to or generated in a ChatGPT conversation. Prefer file: ChatGPT supplies a temporary download URL, avoiding slow base64 transfer through the model. Supply exactly one of file or image_data. Legacy base64 uploads still require filename. Returns attachment ID and URL. For documents or image optimization use wp_upload_media.',
+                    '_meta' => array( 'openai/fileParams' => array( 'file' ) ),
                     'inputSchema' => array(
                         'type' => 'object',
                         'properties' => array(
-                            'image_data' => array('type' => 'string', 'description' => 'Base64 encoded image data. Accepts raw base64 string or data URL (e.g. data:image/png;base64,iVBOR...). Whitespace and newlines are stripped automatically.'),
-                            'filename' => array('type' => 'string', 'description' => 'Filename with extension (e.g., "image.png"). If extension is missing or wrong, it will be corrected based on the actual image format.'),
+                            'file' => StifliFlexMcp_Upload_Media::getFileSchema(),
+                            'image_data' => array('type' => 'string', 'description' => 'Legacy fallback for clients without file inputs. Prefer file for ChatGPT. Accepts raw base64 or an image data URL; whitespace and newlines are stripped.'),
+                            'filename' => array('type' => 'string', 'description' => 'Required for image_data; optional filename override for file. Image extensions are detected from the actual image format.'),
                             'alt_text' => array('type' => 'string', 'description' => 'Alt text for the image'),
                             'title' => array('type' => 'string', 'description' => 'Title for the image'),
                             'post_id' => array('type' => 'integer', 'description' => 'Optional post ID to attach the image to'),
                         ),
-                        'required' => array('image_data', 'filename'),
+                        'required' => array(),
                     ),
                 ),
 
@@ -845,11 +1121,24 @@ class StifliFlexMcpModel {
                 ),
                 'wp_create_nav_menu' => array(
                     'name' => 'wp_create_nav_menu',
-                    'description' => 'Create a new navigation menu. Requires menu_name.',
+                    'description' => 'Create a new navigation menu with optional theme-location assignment. Requires menu_name.',
                     'inputSchema' => array(
                         'type' => 'object',
                         'properties' => array(
                             'menu_name' => array('type' => 'string'),
+                            'theme_location' => array('type' => 'string'),
+                        ),
+                        'required' => array('menu_name'),
+                    ),
+                ),
+                'wp_create_menu' => array(
+                    'name' => 'wp_create_menu',
+                    'description' => 'Create a WordPress navigation menu with optional theme-location assignment.',
+                    'inputSchema' => array(
+                        'type' => 'object',
+                        'properties' => array(
+                            'menu_name' => array('type' => 'string'),
+                            'theme_location' => array('type' => 'string'),
                         ),
                         'required' => array('menu_name'),
                     ),
@@ -1011,14 +1300,27 @@ class StifliFlexMcpModel {
                 ),
                 'wp_update_option' => array(
                     'name' => 'wp_update_option',
-                    'description' => 'Update a WordPress option.',
+                    'description' => 'Update a WordPress option. Use dry_run to preview allowed changes and receive a state_hash; pass it as expected_hash to reject stale writes.',
                     'inputSchema' => array(
                         'type' => 'object',
                         'properties' => array(
                             'option' => array('type' => 'string'),
                             'value'  => array('type' => 'string'),
+                            'dry_run' => array('type' => 'boolean', 'default' => false),
+                            'expected_hash' => array('type' => 'string'),
                         ),
                         'required' => array('option','value'),
+                    ),
+                ),
+                'wp_update_permalink_structure' => array(
+                    'name' => 'wp_update_permalink_structure',
+                    'description' => 'Update the WordPress permalink structure while preserving native tokens and percent-encoded input. Flushes rewrite rules after a successful change.',
+                    'inputSchema' => array(
+                        'type' => 'object',
+                        'properties' => array(
+                            'structure' => array( 'type' => 'string', 'description' => 'Structure such as /%category%/%postname%/ or an empty string for plain permalinks.' ),
+                        ),
+                        'required' => array( 'structure' ),
                     ),
                 ),
                 // wp_delete_option intentionally removed for safety: cannot be reliably undone.
@@ -1191,11 +1493,24 @@ class StifliFlexMcpModel {
                 // Yoast SEO
                 'yoast_get_meta' => array(
                     'name' => 'yoast_get_meta',
-                    'description' => 'Get Yoast SEO meta fields and WordPress slug for a post (title, description, focus keyword, canonical, robots, OG, Twitter). Requires Yoast SEO plugin active.',
+                    'description' => 'Get stored and resolved Yoast SEO values, WordPress slug, and analysis status for a post. Requires Yoast SEO plugin active.',
                     'inputSchema' => array(
                         'type' => 'object',
                         'properties' => array(
                             'post_id' => array('type' => 'integer', 'description' => 'Post ID to read Yoast meta from'),
+                            'ID' => array('type' => 'integer'),
+                            'id' => array('type' => 'integer'),
+                        ),
+                        'required' => array(),
+                    ),
+                ),
+                'yoast_get_schema' => array(
+                    'name' => 'yoast_get_schema',
+                    'description' => 'Get the resolved Yoast SEO JSON-LD schema graph for a post. Requires Yoast SEO plugin active.',
+                    'inputSchema' => array(
+                        'type' => 'object',
+                        'properties' => array(
+                            'post_id' => array('type' => 'integer', 'description' => 'Post ID whose public JSON-LD graph should be resolved'),
                             'ID' => array('type' => 'integer'),
                             'id' => array('type' => 'integer'),
                         ),
@@ -1290,7 +1605,7 @@ class StifliFlexMcpModel {
                 ),
                 'wpforms_get_entries' => array(
                     'name' => 'wpforms_get_entries',
-                    'description' => 'Get form entries for a WPForms form. Returns entry ID, date, fields and status. Requires WPForms plugin active.',
+                    'description' => 'Get a deterministic, paginated list of entries for a WPForms form. Requires an edition of WPForms with entry storage.',
                     'inputSchema' => array(
                         'type' => 'object',
                         'properties' => array(
@@ -1300,6 +1615,28 @@ class StifliFlexMcpModel {
                             'status'  => array('type' => 'string', 'description' => 'Entry status: active, spam, trash or empty for all'),
                         ),
                         'required' => array('form_id'),
+                    ),
+                ),
+                'wpforms_get_form' => array(
+                    'name' => 'wpforms_get_form',
+                    'description' => 'Get a WPForms form schema with normalized fields and choices. Requires WPForms plugin active.',
+                    'inputSchema' => array(
+                        'type' => 'object',
+                        'properties' => array(
+                            'form_id' => array('type' => 'integer'),
+                        ),
+                        'required' => array('form_id'),
+                    ),
+                ),
+                'wpforms_get_entry' => array(
+                    'name' => 'wpforms_get_entry',
+                    'description' => 'Get one WPForms entry by entry ID with normalized dates and redacted sensitive keys. Requires an edition of WPForms with entry storage.',
+                    'inputSchema' => array(
+                        'type' => 'object',
+                        'properties' => array(
+                            'entry_id' => array('type' => 'integer'),
+                        ),
+                        'required' => array('entry_id'),
                     ),
                 ),
 
@@ -1708,11 +2045,13 @@ class StifliFlexMcpModel {
                 ),
                 'wp_update_settings' => array(
                     'name' => 'wp_update_settings',
-                    'description' => 'Update WordPress settings. Pass "settings" object with key-value pairs.',
+                    'description' => 'Update WordPress settings. Use dry_run to preview changes and blocked options. Pass the returned state_hash as expected_hash to reject stale writes.',
                     'inputSchema' => array(
                         'type' => 'object',
                         'properties' => array(
                             'settings' => array('type' => 'object'),
+                            'dry_run' => array('type' => 'boolean', 'default' => false),
+                            'expected_hash' => array('type' => 'string'),
                         ),
                         'required' => array('settings'),
                     ),
@@ -1907,6 +2246,22 @@ class StifliFlexMcpModel {
                 $tools = array_merge( $tools, StifliFlexMcp_Elementor::getTools() );
             }
 
+            // Raw shortcode validation remains useful even when Divi is not active.
+            if ( $this->maybeLoadDiviIntegrationModule() && class_exists( 'StifliFlexMcp_Divi' ) ) {
+                $divi_tools = StifliFlexMcp_Divi::getTools();
+                if ( ! StifliFlexMcp_Divi::isAvailable() ) {
+                    $divi_tools = isset( $divi_tools['divi_validate_layout'] )
+                        ? array( 'divi_validate_layout' => $divi_tools['divi_validate_layout'] )
+                        : array();
+                }
+                $tools = array_merge( $tools, $divi_tools );
+            }
+
+            // Merge Contact Form 7 tools only when its runtime is available.
+            if ( $this->maybeLoadContactForm7IntegrationModule() && class_exists( 'StifliFlexMcp_ContactForm7' ) ) {
+                $tools = array_merge( $tools, StifliFlexMcp_ContactForm7::getTools() );
+            }
+
             // Merge Google Search Console tools only when the optional SEO add-on is enabled.
             if ( $this->isGoogleSearchConsoleRuntimeEnabled() && $this->maybeLoadGoogleSearchConsoleModule() && class_exists( 'StifliFlexMcp_GoogleSearchConsole' ) ) {
                 $tools = array_merge( $tools, StifliFlexMcp_GoogleSearchConsole::getTools() );
@@ -1937,6 +2292,7 @@ class StifliFlexMcpModel {
                 }
             }
 
+            $tools = array_merge( $tools, StifliFlexMcp_Upload_Media::getTools() );
             $this->tools = $tools;
         }
         
@@ -1984,6 +2340,10 @@ class StifliFlexMcpModel {
     private function maybeLoadOptionalModuleForTool( $tool ) {
         if ( 0 === strpos( (string) $tool, 'wp_tec_' ) ) {
             return $this->maybeLoadTecIntegrationModule();
+        }
+
+        if ( 0 === strpos( (string) $tool, 'cf7_' ) || 0 === strpos( (string) $tool, 'flamingo_' ) ) {
+            return $this->maybeLoadContactForm7IntegrationModule();
         }
 
         if ( 0 === strpos( (string) $tool, 'elementor_' ) ) {
@@ -2085,17 +2445,16 @@ class StifliFlexMcpModel {
             // Convert ability name to tool name: "allsi/search-image" -> "ability_allsi_search_image"
             $tool_name = 'ability_' . str_replace(array('/', '-'), '_', $row->ability_name);
             
-            $tools[] = array(
+            $definition = array(
                 'name' => $tool_name,
                 'description' => $row->ability_description ?: $row->ability_label,
                 'inputSchema' => $input_schema,
                 'category' => 'Abilities - ' . $row->ability_category,
-                'intent' => 'sensitive_read', // Abilities may have side effects
-                'requires_confirmation' => true,
                 // Store original ability name for execution
                 '_ability_name' => $row->ability_name,
                 '_is_ability' => true,
             );
+            $tools[] = array_merge( $definition, $this->getToolMetadata( $tool_name, $definition ) );
         }
         
         return $tools;
@@ -2258,6 +2617,7 @@ class StifliFlexMcpModel {
             'wp_delete_tag' => 'manage_categories',
             // media
             'wp_upload_image_from_url' => 'upload_files',
+            'wp_upload_media' => 'upload_files',
             'wp_upload_image' => 'upload_files',
             'wp_generate_image' => 'upload_files',
             'wp_generate_video' => 'upload_files',
@@ -2273,6 +2633,8 @@ class StifliFlexMcpModel {
             'wp_switch_theme' => 'switch_themes',
             // options/meta/settings
             'wp_update_option' => 'manage_options',
+            'wp_verify_rendered_page' => 'edit_posts',
+			'wp_update_permalink_structure' => 'manage_options',
             'wp_css_set_global' => 'edit_theme_options',
             'wp_css_set_scoped' => 'manage_options',
             'wp_get_plugin_settings' => 'manage_options',
@@ -2298,6 +2660,7 @@ class StifliFlexMcpModel {
             'wp_get_menus' => 'edit_theme_options',
             'wp_get_menu' => 'edit_theme_options',
             'wp_create_nav_menu' => 'edit_theme_options',
+            'wp_create_menu' => 'edit_theme_options',
             'wp_add_nav_menu_item' => 'edit_theme_options',
             'wp_update_nav_menu_item' => 'edit_theme_options',
             'wp_delete_nav_menu_item' => 'edit_theme_options',
@@ -2315,6 +2678,7 @@ class StifliFlexMcpModel {
             'wp_rm_update_post_seo' => 'edit_posts',
             // Yoast SEO
             'yoast_get_meta' => 'edit_posts',
+            'yoast_get_schema' => 'edit_posts',
             'yoast_set_meta' => 'edit_posts',
             'yoast_reindex' => 'manage_options',
             // ACF
@@ -2323,7 +2687,9 @@ class StifliFlexMcpModel {
             'acf_update_field' => 'edit_posts',
             // WPForms
             'wpforms_list_forms' => 'manage_options',
+            'wpforms_get_form' => 'manage_options',
             'wpforms_get_entries' => 'manage_options',
+            'wpforms_get_entry' => 'manage_options',
             // Gravity Forms
             'gf_list_forms' => 'manage_options',
             'gf_get_entries' => 'manage_options',
@@ -2365,6 +2731,14 @@ class StifliFlexMcpModel {
             $map = array_merge( $map, StifliFlexMcp_Elementor::getCapabilities() );
         }
 
+        if ( $this->maybeLoadDiviIntegrationModule() && class_exists( 'StifliFlexMcp_Divi' ) ) {
+            $map = array_merge( $map, StifliFlexMcp_Divi::getCapabilities() );
+        }
+
+        if ( $this->maybeLoadContactForm7IntegrationModule() && class_exists( 'StifliFlexMcp_ContactForm7' ) ) {
+            $map = array_merge( $map, StifliFlexMcp_ContactForm7::getCapabilities() );
+        }
+
         if ( $this->maybeLoadSearchImageModule() && class_exists( 'StifliFlexMcp_Search_Image' ) ) {
             $map = array_merge( $map, StifliFlexMcp_Search_Image::getCapabilities() );
         }
@@ -2376,6 +2750,9 @@ class StifliFlexMcpModel {
 
     public function dispatchTool($tool, $args, $id = null) {
         $tool = is_string( $tool ) ? $tool : ( is_scalar( $tool ) ? (string) $tool : '' );
+        if ( in_array( $tool, array( 'wp_upload_media', 'wp_upload_image' ), true ) && is_array( $args ) ) {
+            $args = StifliFlexMcp_Upload_Media::normalizeArguments( $args );
+        }
         $r = array('jsonrpc' => '2.0', 'id' => $id);
         $utils = 'StifliFlexMcpUtils';
         $frame = class_exists('StifliFlexMcpFrame') ? StifliFlexMcpFrame::_() : null;
@@ -2474,6 +2851,15 @@ class StifliFlexMcpModel {
                 }
             }
             return 0;
+        };
+        $finalizePostMetaMutation = function($post_id) {
+            $post_id = intval($post_id);
+            if (!$post_id || !get_post($post_id)) {
+                return new WP_Error('invalid_post', 'Post not found while finalizing metadata changes.');
+            }
+
+            clean_post_cache($post_id);
+            return wp_update_post(array('ID' => $post_id), true);
         };
         $isEmptyTextUpdate = function($value) {
             return is_string($value) && '' === $value;
@@ -2888,7 +3274,7 @@ class StifliFlexMcpModel {
             if ('wp_create_post' !== $tool) {
                 return;
             }
-            $encoded = wp_json_encode($payload);
+			$encoded = wp_json_encode(StifliFlexMcpUtils::redactSecrets($payload));
             if (false === $encoded) {
                 $encoded = '[unserializable]';
             }
@@ -2943,7 +3329,7 @@ class StifliFlexMcpModel {
         if ( $this->isGoogleSearchConsoleTool( $tool ) && ! $this->isGoogleSearchConsoleRuntimeEnabled() ) {
             $r['error'] = array(
                 'code' => -32603,
-                'message' => 'Google Search Console tools are disabled or not connected. Enable Search Console tools and connect Google OAuth in StifLi Flex MCP > SEO.',
+                'message' => 'Google Search Console tools are disabled or not connected. Enable Search Console tools and connect Google OAuth in Flex MCP > SEO.',
             );
             return $emitToolCalled($r);
         }
@@ -2958,6 +3344,24 @@ class StifliFlexMcpModel {
         }
 
         // Change Tracker: capture before-state for mutating tools
+        if ( in_array( $tool, array( 'wp_update_option', 'wp_update_settings' ), true ) ) {
+            $dry_run = true === StifliFlexMcpUtils::getArrayValue( $args, 'dry_run', false );
+            $expected_hash = StifliFlexMcpUtils::getArrayValue( $args, 'expected_hash', '' );
+            if ( $dry_run || '' !== $expected_hash ) {
+                $settings = 'wp_update_option' === $tool
+                    ? array( StifliFlexMcpUtils::getArrayValue( $args, 'option', '' ) => StifliFlexMcpUtils::getArrayValue( $args, 'value', null ) )
+                    : StifliFlexMcpUtils::getArrayValue( $args, 'settings', array() );
+                $plan = StifliFlexMcpUtils::buildOptionWritePlan( $settings );
+                if ( '' !== $expected_hash && ! hash_equals( $plan['state_hash'], $expected_hash ) ) {
+                    $r['error'] = array( 'code' => -32602, 'message' => 'Settings changed since preview. Run dry_run again before writing.' );
+                    return $r;
+                }
+                if ( $dry_run ) {
+                    $r['result'] = array( 'content' => array( array( 'type' => 'text', 'text' => wp_json_encode( $plan, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) ) ), 'structuredContent' => $plan );
+                    return $r;
+                }
+            }
+        }
         $changeSnapshot = null;
         if ( class_exists( 'StifliFlexMcp_ChangeTracker' ) && get_option( 'sflmcp_changelog_enabled', true ) ) {
             $changeTracker  = StifliFlexMcp_ChangeTracker::getInstance();
@@ -3083,6 +3487,17 @@ class StifliFlexMcpModel {
 
         try {
         switch ($tool) {
+            case 'wp_verify_rendered_page':
+                $verification = StifliFlexMcpUtils::verifyRenderedPage( $args );
+                if ( is_wp_error( $verification ) ) {
+                    $r['error'] = array( 'code' => -32602, 'message' => $verification->get_error_message() );
+                    break;
+                }
+                $r['result'] = array(
+                    'content' => array( array( 'type' => 'text', 'text' => wp_json_encode( $verification, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) ) ),
+                    'structuredContent' => $verification,
+                );
+                break;
             case 'wp_search_image':
                 if ( $this->maybeLoadSearchImageModule() && class_exists( 'StifliFlexMcp_Search_Image' ) ) {
                     $r = StifliFlexMcp_Search_Image::dispatch( $tool, $args, $id );
@@ -3179,6 +3594,7 @@ class StifliFlexMcpModel {
                     }
                 }
 
+				$r['result']['structuredContent'] = $pingData;
                 $addResultText($r, 'Ping successful: ' . wp_json_encode($pingData, JSON_PRETTY_PRINT));
                 break;
             case 'wp_get_posts':
@@ -3237,6 +3653,8 @@ class StifliFlexMcpModel {
                     }
                     if ($includePostFeaturedMedia) {
                         $row['featured_media'] = $buildFeaturedMedia($p->ID);
+                        $row['featured_media_id'] = $row['featured_media'] ? $row['featured_media']['ID'] : 0;
+                        $row['featured_media_url'] = $row['featured_media'] ? $row['featured_media']['url'] : '';
                     }
                     if ($includePostTaxonomies) {
                         $row['taxonomies'] = $buildPostTaxonomies($p);
@@ -3250,6 +3668,10 @@ class StifliFlexMcpModel {
                         'pagination' => $buildPaginationMeta((int) $postQuery->found_posts, $postsLimit, $effectivePostsOffset, $postsPaged),
                     );
                 }
+                $postsStructured = $includePostsPagination
+                    ? $rows
+                    : array( 'items' => $rows );
+                $r['result']['structuredContent'] = $postsStructured;
                 $addResultText($r, wp_json_encode($rows, JSON_PRETTY_PRINT));
                 break;
             case 'wp_get_post':
@@ -3286,10 +3708,13 @@ class StifliFlexMcpModel {
                 }
                 if ($includeSingleFeaturedMedia) {
                     $out['featured_media'] = $buildFeaturedMedia($p->ID);
+                    $out['featured_media_id'] = $out['featured_media'] ? $out['featured_media']['ID'] : 0;
+                    $out['featured_media_url'] = $out['featured_media'] ? $out['featured_media']['url'] : '';
                 }
                 if ($includeSingleTaxonomies) {
                     $out['taxonomies'] = $buildPostTaxonomies($p);
                 }
+				$r['result']['structuredContent'] = $out;
                 $addResultText($r, wp_json_encode($out, JSON_PRETTY_PRINT));
                 break;
             case 'wp_create_post':
@@ -3298,7 +3723,7 @@ class StifliFlexMcpModel {
                     'args' => $args,
                 ));
                 if ($wpCreatePostVerboseTrace) {
-                    stifli_flex_mcp_log('[MCP wp_create_post] Raw args: ' . wp_json_encode($args));
+					stifli_flex_mcp_log('[MCP wp_create_post] Raw args: ' . wp_json_encode(StifliFlexMcpUtils::redactSecrets($args)));
                 }
 
                 $cp_warnings = array();
@@ -3431,7 +3856,7 @@ class StifliFlexMcpModel {
                     }
                 }
                 if ($wpCreatePostVerboseTrace) {
-                    stifli_flex_mcp_log('[MCP wp_create_post] Normalized args: ' . wp_json_encode($ins));
+                    stifli_flex_mcp_log('[MCP wp_create_post] Normalized args: ' . wp_json_encode(StifliFlexMcpUtils::redactSecrets($ins)));
                 }
                 $traceWpCreatePost('tool/before-insert', array('insert_args' => $ins));
 
@@ -3511,7 +3936,7 @@ class StifliFlexMcpModel {
                         $cp_response['warnings'] = $cp_warnings;
                     }
                     if ($wpCreatePostVerboseTrace) {
-                        stifli_flex_mcp_log('[MCP wp_create_post] Final response: ' . wp_json_encode($cp_response));
+                        stifli_flex_mcp_log('[MCP wp_create_post] Final response: ' . wp_json_encode(StifliFlexMcpUtils::redactSecrets($cp_response)));
                     }
                     $traceWpCreatePost('tool/success-response', array('response' => $cp_response));
 
@@ -3773,6 +4198,88 @@ class StifliFlexMcpModel {
                     ),
                 );
                 break;
+            case 'wp_publish_and_promote':
+                $promote_post_id = intval($utils::getArrayValue($args, 'post_id', 0));
+                $promote_post = $promote_post_id > 0 ? get_post($promote_post_id) : null;
+                if (!$promote_post) {
+                    $r['error'] = array('code' => -42600, 'message' => 'Post not found');
+                    break;
+                }
+                if (!in_array($promote_post->post_status, array('draft', 'pending', 'future'), true)) {
+                    $r['error'] = array('code' => -42602, 'message' => 'Only draft, pending, or scheduled posts can be published and promoted.');
+                    break;
+                }
+                $promote_type = get_post_type_object($promote_post->post_type);
+                $promote_publish_cap = $promote_type && !empty($promote_type->cap->publish_posts) ? $promote_type->cap->publish_posts : 'publish_posts';
+                if (!current_user_can('edit_post', $promote_post_id) || !current_user_can($promote_publish_cap)) {
+                    $r['error'] = array('code' => 'permission_denied', 'message' => 'Insufficient permissions to publish this post.');
+                    break;
+                }
+                if (!current_user_can('edit_theme_options')) {
+                    $r['error'] = array('code' => 'permission_denied', 'message' => 'Insufficient permissions to edit navigation menus.');
+                    break;
+                }
+                $promote_menu_id = intval($utils::getArrayValue($args, 'menu_id', 0));
+                $promote_location = sanitize_key((string) $utils::getArrayValue($args, 'menu_location', ''));
+                if (!$promote_menu_id && '' !== $promote_location) {
+                    $promote_locations = get_nav_menu_locations();
+                    $promote_menu_id = isset($promote_locations[$promote_location]) ? intval($promote_locations[$promote_location]) : 0;
+                }
+                if (!$promote_menu_id || !wp_get_nav_menu_object($promote_menu_id)) {
+                    $r['error'] = array('code' => -42602, 'message' => 'A valid menu_id or assigned menu_location is required.');
+                    break;
+                }
+                $promote_original_status = $promote_post->post_status;
+                $promote_updated = wp_update_post(array('ID' => $promote_post_id, 'post_status' => 'publish'), true);
+                if (is_wp_error($promote_updated)) {
+                    $r['error'] = array('code' => $promote_updated->get_error_code(), 'message' => $promote_updated->get_error_message());
+                    break;
+                }
+                $promote_item_id = wp_update_nav_menu_item($promote_menu_id, 0, array(
+                    'menu-item-title' => sanitize_text_field((string) $utils::getArrayValue($args, 'menu_item_title', $promote_post->post_title)),
+                    'menu-item-type' => 'post_type',
+                    'menu-item-object' => $promote_post->post_type,
+                    'menu-item-object-id' => $promote_post_id,
+                    'menu-item-parent-id' => intval($utils::getArrayValue($args, 'menu_item_parent_id', 0)),
+                    'menu-item-status' => 'publish',
+                ));
+                if (is_wp_error($promote_item_id)) {
+                    wp_update_post(array('ID' => $promote_post_id, 'post_status' => $promote_original_status));
+                    $r['error'] = array('code' => $promote_item_id->get_error_code(), 'message' => 'Menu insertion failed; publication was reverted. ' . $promote_item_id->get_error_message());
+                    break;
+                }
+                $promote_payload = array(
+                    'success' => true,
+                    'post_id' => $promote_post_id,
+                    'post_status' => get_post_status($promote_post_id),
+                    'permalink' => get_permalink($promote_post_id),
+                    'menu_id' => $promote_menu_id,
+                    'menu_item_id' => (int) $promote_item_id,
+                );
+                $r['result'] = array(
+                    'content' => array(array('type' => 'text', 'text' => wp_json_encode($promote_payload, JSON_PRETTY_PRINT))),
+                    'structuredContent' => $promote_payload,
+                );
+                break;
+            case 'wp_create_preview_link':
+                $preview_post_id = intval($utils::getArrayValue($args, 'post_id', 0));
+                if (!$preview_post_id || !current_user_can('edit_post', $preview_post_id)) {
+                    $r['error'] = array('code' => 'permission_denied', 'message' => 'Post not found or insufficient permissions.');
+                    break;
+                }
+                $preview_payload = StifliFlexMcp_Preview_Links::create(
+                    $preview_post_id,
+                    intval($utils::getArrayValue($args, 'ttl_minutes', 60))
+                );
+                if (is_wp_error($preview_payload)) {
+                    $r['error'] = array('code' => $preview_payload->get_error_code(), 'message' => $preview_payload->get_error_message());
+                    break;
+                }
+                $r['result'] = array(
+                    'content' => array(array('type' => 'text', 'text' => wp_json_encode($preview_payload, JSON_PRETTY_PRINT))),
+                    'structuredContent' => $preview_payload,
+                );
+                break;
             case 'wp_set_featured_image':
                 $post_id = intval( $utils::getArrayValue( $args, 'post_id', 0 ) );
                 if ( ! $post_id ) {
@@ -3789,22 +4296,63 @@ class StifliFlexMcpModel {
                     break;
                 }
                 $att_id = intval( $utils::getArrayValue( $args, 'attachment_id', 0 ) );
+                $previous_att_id = (int) get_post_thumbnail_id( $post_id );
+                $thumbnail_changed = $previous_att_id !== $att_id;
+                $alt_changed = false;
                 if ( $att_id > 0 ) {
                     $att = get_post( $att_id );
                     if ( ! $att || 'attachment' !== $att->post_type ) {
                         $r['error'] = array( 'code' => -42600, 'message' => 'Attachment not found' );
                         break;
                     }
-                    $ok = set_post_thumbnail( $post_id, $att_id );
-                    if ( $ok ) {
-                        $addResultText( $r, 'Featured image set: post #' . $post_id . ' -> attachment #' . $att_id );
-                    } else {
+                    if ( array_key_exists( 'alt_text', $args ) && ! current_user_can( 'edit_post', $att_id ) ) {
+                        $r['error'] = array( 'code' => 'permission_denied', 'message' => 'Insufficient permissions to edit attachment alt text.' );
+                        break;
+                    }
+                    if ( $thumbnail_changed && ! set_post_thumbnail( $post_id, $att_id ) ) {
                         $r['error'] = array( 'code' => -42603, 'message' => 'Failed to set featured image' );
+                        break;
+                    }
+                    if ( array_key_exists( 'alt_text', $args ) ) {
+                        $alt_text = sanitize_text_field( (string) $args['alt_text'] );
+                        $previous_alt_text = (string) get_post_meta( $att_id, '_wp_attachment_image_alt', true );
+                        $alt_changed = $previous_alt_text !== $alt_text;
+                        if ( $alt_changed ) {
+                            if ( false === update_post_meta( $att_id, '_wp_attachment_image_alt', $alt_text ) ) {
+                                $r['error'] = array( 'code' => -42603, 'message' => 'Failed to update attachment alt text.' );
+                                break;
+                            }
+                            $finalized_attachment = $finalizePostMetaMutation( $att_id );
+                            if ( is_wp_error( $finalized_attachment ) ) {
+                                $r['error'] = array( 'code' => $finalized_attachment->get_error_code(), 'message' => $finalized_attachment->get_error_message() );
+                                break;
+                            }
+                        }
                     }
                 } else {
-                    delete_post_thumbnail( $post_id );
-                    $addResultText( $r, 'Featured image cleared for post #' . $post_id );
+                    if ( $thumbnail_changed && ! delete_post_thumbnail( $post_id ) ) {
+                        $r['error'] = array( 'code' => -42603, 'message' => 'Failed to clear featured image' );
+                        break;
+                    }
                 }
+                if ( $thumbnail_changed || $alt_changed ) {
+                    $finalized_post = $finalizePostMetaMutation( $post_id );
+                    if ( is_wp_error( $finalized_post ) ) {
+                        $r['error'] = array( 'code' => $finalized_post->get_error_code(), 'message' => $finalized_post->get_error_message() );
+                        break;
+                    }
+                }
+                $featured_payload = array(
+                    'post_id' => $post_id,
+                    'attachment_id' => $att_id,
+                    'changed' => $thumbnail_changed || $alt_changed,
+                    'thumbnail_changed' => $thumbnail_changed,
+                    'alt_text_changed' => $alt_changed,
+                );
+                $r['result'] = array(
+                    'content' => array(array('type' => 'text', 'text' => wp_json_encode($featured_payload, JSON_PRETTY_PRINT))),
+                    'structuredContent' => $featured_payload,
+                );
                 break;
             case 'wp_delete_post':
                 $delete_post_id = $resolveObjectId($args);
@@ -4313,6 +4861,25 @@ class StifliFlexMcpModel {
                 $out = array('ID' => $att->ID, 'post_title' => $att->post_title, 'mime_type' => get_post_mime_type($att), 'url' => wp_get_attachment_url($att->ID), 'meta' => $meta);
                 $addResultText($r, wp_json_encode($out, JSON_PRETTY_PRINT));
                 break;
+            case 'wp_upload_media':
+                if ( ! $this->isToolEnabledForRuntime( 'wp_upload_media' ) ) {
+                    $r['error'] = array( 'code' => -32603, 'message' => 'Enable wp_upload_media in Flex MCP > MCP Server > WordPress Tools before uploading files.' );
+                    break;
+                }
+                $uploaded = StifliFlexMcp_Upload_Media::upload( is_array( $args ) ? $args : array() );
+                if ( is_wp_error( $uploaded ) ) {
+                    $r['error'] = array(
+                        'code' => -32603,
+                        'message' => $uploaded->get_error_message(),
+                        'data' => array( 'reason' => $uploaded->get_error_code() ),
+                    );
+                } else {
+                    $r['result'] = array(
+                        'content' => array( array( 'type' => 'text', 'text' => wp_json_encode( $uploaded, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) ) ),
+                        'structuredContent' => $uploaded,
+                    );
+                }
+                break;
             case 'wp_upload_image_from_url':
                 $url = esc_url_raw($utils::getArrayValue($args, 'url'));
                 // Debug logging (remove for production or wrap in WP_DEBUG check)
@@ -4485,6 +5052,34 @@ class StifliFlexMcpModel {
                 $addResultText($r, 'Image uploaded successfully. Attachment ID: ' . $att_id . ', URL: ' . $att_url);
                 break;
             case 'wp_upload_image':
+                $has_file = array_key_exists( 'file', $args );
+                $has_image_data = array_key_exists( 'image_data', $args );
+                if ( $has_file === $has_image_data ) {
+                    $r['error'] = array( 'code' => -32602, 'message' => 'Supply exactly one of file or image_data. Prefer file for ChatGPT images.' );
+                    break;
+                }
+                if ( $has_file ) {
+                    if ( ! $this->isToolEnabledForRuntime( 'wp_upload_image' ) ) {
+                        $r['error'] = array( 'code' => -32603, 'message' => 'Enable wp_upload_image in Flex MCP > MCP Server > WordPress Tools before uploading images.' );
+                        break;
+                    }
+                    $uploaded = StifliFlexMcp_Upload_Media::upload( $args, true );
+                    if ( is_wp_error( $uploaded ) ) {
+                        $r['error'] = array(
+                            'code' => -32603,
+                            'message' => $uploaded->get_error_message(),
+                            'data' => array( 'reason' => $uploaded->get_error_code() ),
+                        );
+                    } else {
+                        $r['result']['structuredContent'] = $uploaded;
+                        $addResultText( $r, 'Image uploaded successfully. Attachment ID: ' . $uploaded['id'] . ', URL: ' . $uploaded['url'] );
+                    }
+                    break;
+                }
+                if ( ! array_key_exists( 'filename', $args ) ) {
+                    $r['error'] = array( 'code' => -42602, 'message' => 'filename is required for legacy image_data uploads.' );
+                    break;
+                }
                 $image_data = $utils::getArrayValue($args, 'image_data');
                 $filename = sanitize_file_name($utils::getArrayValue($args, 'filename', 'image.png'));
                 $post_id = intval($utils::getArrayValue($args, 'post_id', 0));
@@ -4876,6 +5471,7 @@ class StifliFlexMcpModel {
                 $addResultText($r, wp_json_encode($out, JSON_PRETTY_PRINT));
                 break;
             case 'wp_create_nav_menu':
+            case 'wp_create_menu':
                 if (empty($args['menu_name'])) {
                     $r['error'] = array('code' => -42602, 'message' => 'menu_name required');
                     break;
@@ -4884,7 +5480,24 @@ class StifliFlexMcpModel {
                 if (is_wp_error($menu_id)) {
                     $r['error'] = array('code' => $menu_id->get_error_code(), 'message' => $menu_id->get_error_message());
                 } else {
-                    $addResultText($r, 'Navigation menu created with ID ' . $menu_id);
+                    $theme_location = sanitize_key((string) $utils::getArrayValue($args, 'theme_location', ''));
+                    if ('' !== $theme_location) {
+                        $registered_locations = get_registered_nav_menus();
+                        if (!isset($registered_locations[$theme_location])) {
+                            wp_delete_nav_menu($menu_id);
+                            $r['error'] = array('code' => -42602, 'message' => 'Unknown theme_location; menu creation was reverted.');
+                            break;
+                        }
+                        $locations = get_theme_mod('nav_menu_locations', array());
+                        $locations = is_array($locations) ? $locations : array();
+                        $locations[$theme_location] = (int) $menu_id;
+                        set_theme_mod('nav_menu_locations', $locations);
+                    }
+                    $menu_payload = array('success' => true, 'menu_id' => (int) $menu_id, 'menu_name' => sanitize_text_field($args['menu_name']), 'theme_location' => $theme_location);
+                    $r['result'] = array(
+                        'content' => array(array('type' => 'text', 'text' => wp_json_encode($menu_payload, JSON_PRETTY_PRINT))),
+                        'structuredContent' => $menu_payload,
+                    );
                 }
                 break;
             case 'wp_add_nav_menu_item':
@@ -5126,7 +5739,7 @@ class StifliFlexMcpModel {
                 }
                 if ( empty( $api_key ) ) {
                     stifli_flex_mcp_log('wp_generate_image: ERROR - no API key configured for provider=' . $provider);
-                    $r['error'] = array( 'code' => -32603, 'message' => 'No AI API key configured. Go to StifLi Flex MCP > Multimedia Settings to set one.' );
+                    $r['error'] = array( 'code' => -32603, 'message' => 'No AI API key configured. Go to Flex MCP > Multimedia Settings to set one.' );
                     break;
                 }
                 stifli_flex_mcp_log('wp_generate_image: API key resolved (length=' . strlen( $api_key ) . ')');
@@ -5668,7 +6281,7 @@ class StifliFlexMcpModel {
                 }
                 if ( empty( $vid_api_key ) ) {
                     stifli_flex_mcp_log('wp_generate_video: ERROR - no API key configured for provider=' . $vid_provider);
-                    $r['error'] = array( 'code' => -32603, 'message' => 'No video AI API key configured. Go to StifLi Flex MCP > Multimedia > Videos to set one.' );
+                    $r['error'] = array( 'code' => -32603, 'message' => 'No video AI API key configured. Go to Flex MCP > Multimedia > Videos to set one.' );
                     break;
                 }
                 stifli_flex_mcp_log('wp_generate_video: API key resolved (length=' . strlen( $vid_api_key ) . ')');
@@ -6454,6 +7067,12 @@ class StifliFlexMcpModel {
                         break;
                     }
                     $rm_updated[] = 'slug';
+                } elseif ( ! empty( $rm_updated ) ) {
+                    $rm_finalized = $finalizePostMetaMutation( $rm_post_id );
+                    if ( is_wp_error( $rm_finalized ) ) {
+                        $r['error'] = array('code' => $rm_finalized->get_error_code(), 'message' => $rm_finalized->get_error_message());
+                        break;
+                    }
                 }
                 $rm_saved_post = get_post($rm_post_id);
                 $addResultText( $r, wp_json_encode( array(
@@ -6496,11 +7115,99 @@ class StifliFlexMcpModel {
                     '_yoast_wpseo_twitter-description' => 'twitter_description',
                     '_yoast_wpseo_twitter-image'      => 'twitter_image',
                 );
-                $ys_data = array( 'post_id' => $ys_post_id, 'slug' => $ys_post->post_name );
+                $ys_stored = array();
                 foreach ( $ys_keys as $ys_meta_key => $ys_field ) {
-                    $ys_data[ $ys_field ] = get_post_meta( $ys_post_id, $ys_meta_key, true );
+                    $ys_stored[ $ys_field ] = get_post_meta( $ys_post_id, $ys_meta_key, true );
                 }
+                $ys_head_json = array();
+                $ys_permalink = get_permalink( $ys_post_id );
+                if ( $ys_permalink && class_exists( 'WP_REST_Request' ) ) {
+                    $ys_head_request = new WP_REST_Request( 'GET', '/yoast/v1/get_head' );
+                    $ys_head_request->set_param( 'url', $ys_permalink );
+                    $ys_head_response = rest_do_request( $ys_head_request );
+                    if ( ! $ys_head_response->is_error() ) {
+                        $ys_head_payload = $ys_head_response->get_data();
+                        if ( isset( $ys_head_payload['json'] ) && is_array( $ys_head_payload['json'] ) ) {
+                            $ys_head_json = $ys_head_payload['json'];
+                        }
+                    }
+                }
+                $ys_open_graph_images = isset( $ys_head_json['og_image'] ) && is_array( $ys_head_json['og_image'] ) ? $ys_head_json['og_image'] : array();
+                $ys_first_open_graph_image = ! empty( $ys_open_graph_images[0]['url'] ) ? $ys_open_graph_images[0]['url'] : '';
+                $ys_resolved = array(
+                    'title' => isset( $ys_head_json['title'] ) ? $ys_head_json['title'] : $ys_stored['title'],
+                    'description' => isset( $ys_head_json['description'] ) ? $ys_head_json['description'] : $ys_stored['description'],
+                    'canonical' => isset( $ys_head_json['canonical'] ) ? $ys_head_json['canonical'] : ( $ys_stored['canonical'] ?: $ys_permalink ),
+                    'facebook_title' => isset( $ys_head_json['og_title'] ) ? $ys_head_json['og_title'] : ( $ys_stored['facebook_title'] ?: $ys_post->post_title ),
+                    'facebook_description' => isset( $ys_head_json['og_description'] ) ? $ys_head_json['og_description'] : ( $ys_stored['facebook_description'] ?: $ys_stored['description'] ),
+                    'facebook_image' => $ys_first_open_graph_image ?: $ys_stored['facebook_image'],
+                    'twitter_title' => isset( $ys_head_json['twitter_title'] ) ? $ys_head_json['twitter_title'] : ( $ys_stored['twitter_title'] ?: $ys_post->post_title ),
+                    'twitter_description' => isset( $ys_head_json['twitter_description'] ) ? $ys_head_json['twitter_description'] : ( $ys_stored['twitter_description'] ?: $ys_stored['description'] ),
+                    'twitter_image' => isset( $ys_head_json['twitter_image'] ) ? $ys_head_json['twitter_image'] : $ys_stored['twitter_image'],
+                    'robots' => isset( $ys_head_json['robots'] ) ? $ys_head_json['robots'] : array(),
+                );
+                $ys_seo_score = get_post_meta( $ys_post_id, '_yoast_wpseo_linkdex', true );
+                $ys_readability_score = get_post_meta( $ys_post_id, '_yoast_wpseo_content_score', true );
+                $ys_score_status = function( $score ) {
+                    if ( '' === $score || null === $score ) {
+                        return 'not_analyzed';
+                    }
+                    $score = intval( $score );
+                    if ( $score <= 40 ) {
+                        return 'needs_improvement';
+                    }
+                    return $score <= 70 ? 'okay' : 'good';
+                };
+                $ys_data = array_merge( array( 'post_id' => $ys_post_id, 'slug' => $ys_post->post_name ), $ys_stored );
+                $ys_data['stored'] = $ys_stored;
+                $ys_data['resolved'] = $ys_resolved;
+                $ys_data['analysis'] = array(
+                    'pending' => ( '' === $ys_seo_score && '' === $ys_readability_score ),
+                    'seo_score' => '' === $ys_seo_score ? null : intval( $ys_seo_score ),
+                    'seo_status' => $ys_score_status( $ys_seo_score ),
+                    'readability_score' => '' === $ys_readability_score ? null : intval( $ys_readability_score ),
+                    'readability_status' => $ys_score_status( $ys_readability_score ),
+                );
+                $ys_data['analysis_pending'] = $ys_data['analysis']['pending'];
                 $addResultText( $r, wp_json_encode( $ys_data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) );
+                break;
+            case 'yoast_get_schema':
+                if ( ! defined( 'WPSEO_VERSION' ) ) {
+                    $r['error'] = array( 'code' => -32603, 'message' => 'Yoast SEO plugin is not active.' );
+                    break;
+                }
+                $ys_schema_post_id = $resolveObjectId( $args );
+                $ys_schema_post = $ys_schema_post_id ? get_post( $ys_schema_post_id ) : null;
+                if ( ! $ys_schema_post ) {
+                    $r['error'] = array( 'code' => -32602, 'message' => 'Invalid or missing post_id.' );
+                    break;
+                }
+                if ( ! current_user_can( 'edit_post', $ys_schema_post_id ) ) {
+                    $r['error'] = array( 'code' => -32603, 'message' => 'You do not have permission to read SEO data for this post.' );
+                    break;
+                }
+                $ys_schema_request = new WP_REST_Request( 'GET', '/yoast/v1/get_head' );
+                $ys_schema_request->set_param( 'url', get_permalink( $ys_schema_post_id ) );
+                $ys_schema_response = rest_do_request( $ys_schema_request );
+                if ( $ys_schema_response->is_error() ) {
+                    $ys_schema_error = $ys_schema_response->as_error();
+                    $r['error'] = array( 'code' => -32603, 'message' => $ys_schema_error->get_error_message() );
+                    break;
+                }
+                $ys_schema_payload = $ys_schema_response->get_data();
+                $ys_schema = isset( $ys_schema_payload['json']['schema'] ) && is_array( $ys_schema_payload['json']['schema'] )
+                    ? $ys_schema_payload['json']['schema']
+                    : array();
+                $ys_schema = StifliFlexMcpUtils::redactSecrets( $ys_schema );
+                $ys_schema_result = array(
+                    'post_id' => $ys_schema_post_id,
+                    'permalink' => get_permalink( $ys_schema_post_id ),
+                    'schema' => $ys_schema,
+                );
+                $r['result'] = array(
+                    'content' => array(array('type' => 'text', 'text' => wp_json_encode($ys_schema_result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES))),
+                    'structuredContent' => $ys_schema_result,
+                );
                 break;
             case 'yoast_set_meta':
                 if ( ! defined( 'WPSEO_VERSION' ) ) {
@@ -6538,14 +7245,16 @@ class StifliFlexMcpModel {
                         $ys_val = in_array( $ys_arg, array( 'canonical', 'facebook_image', 'twitter_image' ), true )
                             ? esc_url_raw( $args[ $ys_arg ] )
                             : sanitize_text_field( $args[ $ys_arg ] );
-                        update_post_meta( $ys_post_id, $ys_meta, $ys_val );
-                        $ys_updated[] = $ys_arg;
+                        if ( false !== update_post_meta( $ys_post_id, $ys_meta, $ys_val ) ) {
+                            $ys_updated[] = $ys_arg;
+                        }
                     }
                 }
                 foreach ( $ys_bool_map as $ys_arg => $ys_meta ) {
                     if ( isset( $args[ $ys_arg ] ) ) {
-                        update_post_meta( $ys_post_id, $ys_meta, $args[ $ys_arg ] ? '1' : '0' );
-                        $ys_updated[] = $ys_arg;
+                        if ( false !== update_post_meta( $ys_post_id, $ys_meta, $args[ $ys_arg ] ? '1' : '0' ) ) {
+                            $ys_updated[] = $ys_arg;
+                        }
                     }
                 }
                 $ys_slug = $resolveSlugUpdate($args);
@@ -6556,6 +7265,12 @@ class StifliFlexMcpModel {
                         break;
                     }
                     $ys_updated[] = 'slug';
+                } elseif ( ! empty( $ys_updated ) ) {
+                    $ys_finalized = $finalizePostMetaMutation( $ys_post_id );
+                    if ( is_wp_error( $ys_finalized ) ) {
+                        $r['error'] = array('code' => $ys_finalized->get_error_code(), 'message' => $ys_finalized->get_error_message());
+                        break;
+                    }
                 }
                 $ys_saved_post = get_post($ys_post_id);
                 $addResultText( $r, wp_json_encode( array( 'post_id' => $ys_post_id, 'slug' => $ys_saved_post ? $ys_saved_post->post_name : '', 'updated_fields' => $ys_updated ), JSON_PRETTY_PRINT ) );
@@ -6701,9 +7416,19 @@ class StifliFlexMcpModel {
                 }
                 // Value can be any type (string, int, bool, array) — passed as-is.
                 $acf_value  = $utils::getArrayValue( $args, 'value', null );
+                $acf_previous_value = get_field( $acf_field_name, $acf_post_id, false );
+                if ( $acf_previous_value === $acf_value ) {
+                    $addResultText( $r, wp_json_encode( array( 'post_id' => $acf_post_id, 'field_name' => $acf_field_name, 'updated' => false ), JSON_PRETTY_PRINT ) );
+                    break;
+                }
                 $acf_result = update_field( $acf_field_name, $acf_value, $acf_post_id );
                 if ( false === $acf_result ) {
                     $r['error'] = array( 'code' => -32603, 'message' => 'ACF update_field returned false. Check field name and post ID.' );
+                    break;
+                }
+                $acf_finalized = $finalizePostMetaMutation( $acf_post_id );
+                if ( is_wp_error( $acf_finalized ) ) {
+                    $r['error'] = array( 'code' => $acf_finalized->get_error_code(), 'message' => $acf_finalized->get_error_message() );
                     break;
                 }
                 $addResultText( $r, wp_json_encode( array( 'post_id' => $acf_post_id, 'field_name' => $acf_field_name, 'updated' => true ), JSON_PRETTY_PRINT ) );
@@ -6738,9 +7463,66 @@ class StifliFlexMcpModel {
                 }
                 $addResultText( $r, wp_json_encode( $wpf_out, JSON_PRETTY_PRINT ) );
                 break;
+            case 'wpforms_get_form':
+                if ( ! function_exists( 'wpforms' ) ) {
+                    $r['error'] = array( 'code' => -32603, 'message' => 'WPForms plugin is not active.' );
+                    break;
+                }
+                $wpf_form_id = intval( $utils::getArrayValue( $args, 'form_id', 0 ) );
+                $wpf_form = $wpf_form_id ? wpforms()->form->get( $wpf_form_id ) : null;
+                if ( ! $wpf_form ) {
+                    $r['error'] = array( 'code' => -32602, 'message' => 'WPForms form not found.' );
+                    break;
+                }
+                $wpf_form_data = function_exists( 'wpforms_decode' )
+                    ? wpforms_decode( $wpf_form->post_content )
+                    : json_decode( $wpf_form->post_content, true );
+                $wpf_form_data = is_array( $wpf_form_data ) ? $wpf_form_data : array();
+                $wpf_fields = array();
+                foreach ( isset( $wpf_form_data['fields'] ) && is_array( $wpf_form_data['fields'] ) ? $wpf_form_data['fields'] : array() as $wpf_field_id => $wpf_field ) {
+                    if ( ! is_array( $wpf_field ) ) {
+                        continue;
+                    }
+                    $wpf_choices = array();
+                    foreach ( isset( $wpf_field['choices'] ) && is_array( $wpf_field['choices'] ) ? $wpf_field['choices'] : array() as $wpf_choice_key => $wpf_choice ) {
+                        $wpf_choice = is_array( $wpf_choice ) ? $wpf_choice : array( 'label' => $wpf_choice );
+                        $wpf_choices[] = array(
+                            'key' => (string) $wpf_choice_key,
+                            'label' => isset( $wpf_choice['label'] ) ? sanitize_text_field( $wpf_choice['label'] ) : '',
+                            'value' => isset( $wpf_choice['value'] ) ? sanitize_text_field( $wpf_choice['value'] ) : ( isset( $wpf_choice['label'] ) ? sanitize_text_field( $wpf_choice['label'] ) : '' ),
+                        );
+                    }
+                    $wpf_fields[] = array(
+                        'id' => isset( $wpf_field['id'] ) ? (int) $wpf_field['id'] : (int) $wpf_field_id,
+                        'type' => isset( $wpf_field['type'] ) ? sanitize_key( $wpf_field['type'] ) : '',
+                        'label' => isset( $wpf_field['label'] ) ? sanitize_text_field( $wpf_field['label'] ) : '',
+                        'description' => isset( $wpf_field['description'] ) ? sanitize_textarea_field( $wpf_field['description'] ) : '',
+                        'required' => ! empty( $wpf_field['required'] ),
+                        'choices' => $wpf_choices,
+                    );
+                }
+                $wpf_form_payload = array(
+                    'form_id' => (int) $wpf_form->ID,
+                    'title' => $wpf_form->post_title,
+                    'status' => $wpf_form->post_status,
+                    'created' => $wpf_form->post_date_gmt,
+                    'modified' => $wpf_form->post_modified_gmt,
+                    'fields' => $wpf_fields,
+                    'field_count' => count( $wpf_fields ),
+                );
+                $r['result'] = array(
+                    'content' => array(array('type' => 'text', 'text' => wp_json_encode($wpf_form_payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES))),
+                    'structuredContent' => $wpf_form_payload,
+                );
+                break;
             case 'wpforms_get_entries':
                 if ( ! function_exists( 'wpforms' ) ) {
                     $r['error'] = array( 'code' => -32603, 'message' => 'WPForms plugin is not active.' );
+                    break;
+                }
+                $wpf_entry_handler = isset( wpforms()->entry ) ? wpforms()->entry : null;
+                if ( ! is_object( $wpf_entry_handler ) || ! method_exists( $wpf_entry_handler, 'get_entries' ) ) {
+                    $r['error'] = array( 'code' => -32603, 'message' => 'WPForms entry storage is not available in this installation.' );
                     break;
                 }
                 $wpf_form_id = intval( $utils::getArrayValue( $args, 'form_id', 0 ) );
@@ -6748,31 +7530,75 @@ class StifliFlexMcpModel {
                     $r['error'] = array( 'code' => -32602, 'message' => 'Missing required parameter: form_id.' );
                     break;
                 }
-                $wpf_limit   = max( 1, intval( $utils::getArrayValue( $args, 'limit', 20 ) ) );
+                $wpf_limit   = min( 100, max( 1, intval( $utils::getArrayValue( $args, 'limit', 20 ) ) ) );
                 $wpf_offset  = max( 0, intval( $utils::getArrayValue( $args, 'offset', 0 ) ) );
                 $wpf_status  = sanitize_text_field( $utils::getArrayValue( $args, 'status', '' ) );
                 $wpf_query   = array(
                     'form_id'  => $wpf_form_id,
                     'number'   => $wpf_limit,
                     'offset'   => $wpf_offset,
+                    'orderby'  => 'entry_id',
+                    'order'    => 'DESC',
                 );
                 if ( $wpf_status ) {
                     $wpf_query['status'] = $wpf_status;
                 }
-                $wpf_entries = wpforms()->entry->get_entries( $wpf_query );
+                $wpf_entries = $wpf_entry_handler->get_entries( $wpf_query );
+                $wpf_count_query = $wpf_query;
+                unset( $wpf_count_query['number'], $wpf_count_query['offset'], $wpf_count_query['orderby'], $wpf_count_query['order'] );
+                $wpf_total = (int) $wpf_entry_handler->get_entries( $wpf_count_query, true );
                 $wpf_out = array();
                 if ( $wpf_entries ) {
                     foreach ( $wpf_entries as $wpf_entry ) {
+                        $wpf_timestamp = ! empty( $wpf_entry->date ) ? strtotime( $wpf_entry->date . ' UTC' ) : false;
                         $wpf_out[] = array(
-                            'entry_id' => $wpf_entry->entry_id,
-                            'form_id'  => $wpf_entry->form_id,
-                            'date'     => $wpf_entry->date,
-                            'status'   => $wpf_entry->status,
-                            'fields'   => json_decode( $wpf_entry->fields, true ),
+                            'entry_id' => (int) $wpf_entry->entry_id,
+                            'form_id'  => (int) $wpf_entry->form_id,
+                            'date'     => $wpf_timestamp ? gmdate( 'c', $wpf_timestamp ) : (string) $wpf_entry->date,
+                            'date_epoch' => $wpf_timestamp ? $wpf_timestamp : null,
+                            'status'   => sanitize_key( $wpf_entry->status ),
+                            'fields'   => StifliFlexMcpUtils::redactSecrets( json_decode( $wpf_entry->fields, true ) ),
                         );
                     }
                 }
-                $addResultText( $r, wp_json_encode( $wpf_out, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) );
+                $wpf_entries_payload = array(
+                    'items' => $wpf_out,
+                    'pagination' => $buildPaginationMeta( $wpf_total, $wpf_limit, $wpf_offset ),
+                );
+                $r['result'] = array(
+                    'content' => array(array('type' => 'text', 'text' => wp_json_encode($wpf_entries_payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES))),
+                    'structuredContent' => $wpf_entries_payload,
+                );
+                break;
+            case 'wpforms_get_entry':
+                if ( ! function_exists( 'wpforms' ) ) {
+                    $r['error'] = array( 'code' => -32603, 'message' => 'WPForms plugin is not active.' );
+                    break;
+                }
+                $wpf_entry_handler = isset( wpforms()->entry ) ? wpforms()->entry : null;
+                if ( ! is_object( $wpf_entry_handler ) || ! method_exists( $wpf_entry_handler, 'get' ) ) {
+                    $r['error'] = array( 'code' => -32603, 'message' => 'WPForms entry storage is not available in this installation.' );
+                    break;
+                }
+                $wpf_entry_id = intval( $utils::getArrayValue( $args, 'entry_id', 0 ) );
+                $wpf_entry = $wpf_entry_id ? $wpf_entry_handler->get( $wpf_entry_id ) : null;
+                if ( ! $wpf_entry ) {
+                    $r['error'] = array( 'code' => -32602, 'message' => 'WPForms entry not found.' );
+                    break;
+                }
+                $wpf_timestamp = ! empty( $wpf_entry->date ) ? strtotime( $wpf_entry->date . ' UTC' ) : false;
+                $wpf_entry_payload = array(
+                    'entry_id' => (int) $wpf_entry->entry_id,
+                    'form_id' => (int) $wpf_entry->form_id,
+                    'date' => $wpf_timestamp ? gmdate( 'c', $wpf_timestamp ) : (string) $wpf_entry->date,
+                    'date_epoch' => $wpf_timestamp ? $wpf_timestamp : null,
+                    'status' => sanitize_key( $wpf_entry->status ),
+                    'fields' => StifliFlexMcpUtils::redactSecrets( json_decode( $wpf_entry->fields, true ) ),
+                );
+                $r['result'] = array(
+                    'content' => array(array('type' => 'text', 'text' => wp_json_encode($wpf_entry_payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES))),
+                    'structuredContent' => $wpf_entry_payload,
+                );
                 break;
 
             // ── Gravity Forms ─────────────────────────────────────────────────
@@ -6972,6 +7798,11 @@ class StifliFlexMcpModel {
                 }
                 $updated = update_post_meta($post_id, $meta_key, $meta_value);
                 if ($updated) {
+                    $finalized = $finalizePostMetaMutation($post_id);
+                    if (is_wp_error($finalized)) {
+                        $r['error'] = array('code' => $finalized->get_error_code(), 'message' => $finalized->get_error_message());
+                        break;
+                    }
                     $addResultText($r, 'Meta creado/actualizado para post ' . $post_id . ' (' . $meta_key . ')');
                 } else {
                     $addResultText($r, 'No se pudo crear/actualizar el metadato para post ' . $post_id . ' (' . $meta_key . ')');
@@ -7014,6 +7845,11 @@ class StifliFlexMcpModel {
                     ), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
                     break;
                 }
+                $finalized = $finalizePostMetaMutation($post_id);
+                if (is_wp_error($finalized)) {
+                    $r['error'] = array('code' => $finalized->get_error_code(), 'message' => $finalized->get_error_message());
+                    break;
+                }
                 $addResultText($r, wp_json_encode(array(
                     'created' => true,
                     'meta_id' => (int) $meta_id,
@@ -7035,6 +7871,11 @@ class StifliFlexMcpModel {
                 }
                 $deleted = delete_post_meta($post_id, $meta_key, $meta_value);
                 if ($deleted) {
+                    $finalized = $finalizePostMetaMutation($post_id);
+                    if (is_wp_error($finalized)) {
+                        $r['error'] = array('code' => $finalized->get_error_code(), 'message' => $finalized->get_error_message());
+                        break;
+                    }
                     $addResultText($r, 'Metadato (' . $meta_key . ') eliminado para post ' . $post_id);
                 } else {
                     $addResultText($r, 'No se eliminó el metadato (' . $meta_key . ') para post ' . $post_id);
@@ -7680,6 +8521,59 @@ class StifliFlexMcpModel {
                     $addResultText($r, 'No se pudo actualizar la opción (' . $option . ').');
                 }
                 break;
+            case 'wp_update_permalink_structure':
+                if ( ! current_user_can( 'manage_options' ) ) {
+                    $r['error'] = array( 'code' => 'permission_denied', 'message' => 'Insufficient permissions to update permalink settings.' );
+                    break;
+                }
+                if ( ! array_key_exists( 'structure', $args ) || ! is_string( $args['structure'] ) ) {
+                    $r['error'] = array( 'code' => 'invalid_params', 'message' => 'structure must be a string.' );
+                    break;
+                }
+                $permalink_structure = StifliFlexMcpUtils::sanitizeJsonString( $args['structure'] );
+                if ( trim( $permalink_structure ) !== $permalink_structure || preg_match( '/[\x00-\x20\x7F?#]/', $permalink_structure ) ) {
+                    $r['error'] = array( 'code' => 'invalid_params', 'message' => 'structure cannot contain whitespace, control characters, a query string, or a fragment.' );
+                    break;
+                }
+                preg_match_all( '/%([A-Za-z_]+)%/', $permalink_structure, $permalink_tokens );
+                $allowed_permalink_tokens = array( 'year', 'monthnum', 'day', 'hour', 'minute', 'second', 'post_id', 'postname', 'category', 'author' );
+                $unknown_permalink_tokens = array_values( array_diff( array_unique( isset( $permalink_tokens[1] ) ? $permalink_tokens[1] : array() ), $allowed_permalink_tokens ) );
+                if ( ! empty( $unknown_permalink_tokens ) ) {
+                    $r['error'] = array( 'code' => 'invalid_params', 'message' => 'Unsupported permalink token(s): ' . implode( ', ', $unknown_permalink_tokens ) . '.' );
+                    break;
+                }
+
+                $old_permalink_structure = (string) get_option( 'permalink_structure', '' );
+                global $wp_rewrite;
+                if ( is_object( $wp_rewrite ) && method_exists( $wp_rewrite, 'set_permalink_structure' ) ) {
+                    $wp_rewrite->set_permalink_structure( $permalink_structure );
+                } else {
+                    update_option( 'permalink_structure', $permalink_structure );
+                }
+                flush_rewrite_rules( false );
+                $persisted_permalink_structure = (string) get_option( 'permalink_structure', '' );
+                if ( $persisted_permalink_structure !== $permalink_structure ) {
+                    if ( is_object( $wp_rewrite ) && method_exists( $wp_rewrite, 'set_permalink_structure' ) ) {
+                        $wp_rewrite->set_permalink_structure( $old_permalink_structure );
+                    } else {
+                        update_option( 'permalink_structure', $old_permalink_structure );
+                    }
+                    flush_rewrite_rules( false );
+                    $r['error'] = array( 'code' => 'write_verification_failed', 'message' => 'WordPress did not persist the requested permalink structure exactly.' );
+                    break;
+                }
+                $permalink_payload = array(
+                    'success' => true,
+                    'before' => $old_permalink_structure,
+                    'structure' => $persisted_permalink_structure,
+                    'tokens' => isset( $permalink_tokens[1] ) ? array_values( array_unique( $permalink_tokens[1] ) ) : array(),
+                    'rewrite_rules_flushed' => true,
+                );
+                $r['result'] = array(
+                    'content' => array( array( 'type' => 'text', 'text' => wp_json_encode( $permalink_payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) ) ),
+                    'structuredContent' => $permalink_payload,
+                );
+                break;
             // wp_delete_option intentionally removed: too destructive without reliable undo.
             case 'wp_get_settings':
                 if (!current_user_can('manage_options')) {
@@ -7754,6 +8648,7 @@ class StifliFlexMcpModel {
                         'post_date' => $revision->post_date,
                         'post_title' => $revision->post_title,
                         'post_modified' => $revision->post_modified,
+                        'content_length' => function_exists('mb_strlen') ? mb_strlen((string) $revision->post_content, 'UTF-8') : strlen((string) $revision->post_content),
                     );
                 }
                 
@@ -8037,6 +8932,24 @@ class StifliFlexMcpModel {
                     }
                 }
 
+                // Try Contact Form 7 and Flamingo modules.
+                if ( strpos( $tool, 'cf7_' ) === 0 || strpos( $tool, 'flamingo_' ) === 0 ) {
+                    if ( ! $this->maybeLoadContactForm7IntegrationModule() ) {
+                        $r['error'] = array(
+                            'code' => -32603,
+                            'message' => 'Contact Form 7 plugin is not active.',
+                        );
+                        return $r;
+                    }
+
+                    if ( class_exists( 'StifliFlexMcp_ContactForm7' ) ) {
+                        $result = StifliFlexMcp_ContactForm7::dispatch( $tool, $args, $r, $addResultText, $utils );
+                        if ( $result !== null ) {
+                            return $r;
+                        }
+                    }
+                }
+
                 // Try Elementor module (elementor_* tools)
                 if ( strpos( $tool, 'elementor_' ) === 0 ) {
                     if ( ! $this->maybeLoadElementorIntegrationModule() ) {
@@ -8051,6 +8964,27 @@ class StifliFlexMcpModel {
 
                     if ( class_exists( 'StifliFlexMcp_Elementor' ) ) {
                         $result = StifliFlexMcp_Elementor::dispatch( $tool, $args, $r, $addResultText, $utils );
+                        if ( $result !== null ) {
+                            $recordChangeIfNeeded();
+                            return $r;
+                        }
+                    }
+                }
+
+                // Try Divi module (divi_* tools)
+                if ( strpos( $tool, 'divi_' ) === 0 ) {
+                    if ( ! $this->maybeLoadDiviIntegrationModule() ) {
+                        $r['error'] = array(
+                            'code' => -32603,
+                            'message' => $this->isDiviRuntimeAvailable()
+                                ? 'Divi integration module is not available.'
+                                : 'Divi Builder or a Divi theme is not active.',
+                        );
+                        return $r;
+                    }
+
+                    if ( class_exists( 'StifliFlexMcp_Divi' ) ) {
+                        $result = StifliFlexMcp_Divi::dispatch( $tool, $args, $r, $addResultText, $utils );
                         if ( $result !== null ) {
                             $recordChangeIfNeeded();
                             return $r;

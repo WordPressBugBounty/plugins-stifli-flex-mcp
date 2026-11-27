@@ -20,6 +20,9 @@ class StifliFlexMcp {
 
 	public function __construct() {
 		global $wpdb;
+		if ( defined( 'SFLMCP_VERSION' ) ) {
+			$this->serverVersion = SFLMCP_VERSION;
+		}
 		if (isset($wpdb->prefix)) {
 			$this->queueTable = StifliFlexMcpUtils::getPrefixedTable('sflmcp_queue', false);
 		}
@@ -28,6 +31,8 @@ class StifliFlexMcp {
 	public function init() {
 		add_action('rest_api_init', array($this, 'restApiInit'));
 		add_filter('rest_post_dispatch', array($this, 'addNoCacheHeadersForNamespace'), 9, 3);
+		add_filter( 'rest_allowed_cors_headers', static function( $headers ) { return array_unique( array_merge( $headers, array( 'MCP-Protocol-Version', 'Mcp-Method', 'Mcp-Name' ) ) ); } );
+		add_filter( 'rest_exposed_cors_headers', static function( $headers ) { return array_unique( array_merge( $headers, array( 'MCP-Protocol-Version', 'Retry-After' ) ) ); } );
 		add_action('sflmcp_process_task', array($this, 'processTaskAsync'), 10, 1);
 		$this->ensureDispatcherCallbackRegistered();
 		// Register admin menu and settings when in WP admin
@@ -40,6 +45,7 @@ class StifliFlexMcp {
 			}
 			add_action('admin_init', array($this, 'registerSettings'));
 			add_action('admin_init', array($this, 'handleOAuthWellKnownNoticeDismiss'));
+			add_action('admin_init', array($this, 'handleOAuthWellKnownRecheck'));
 			add_action('admin_init', array($this, 'handleWpMcpHubPromoNoticeDismiss'));
 			add_action('admin_notices', array($this, 'renderOAuthWellKnownNotice'));
 			add_action('admin_notices', array($this, 'renderWpMcpHubPromoNotice'), 20);
@@ -76,6 +82,8 @@ class StifliFlexMcp {
 			add_action('wp_ajax_sflmcp_oauth_revoke_token', array($this, 'ajax_oauth_revoke_token'));
 			add_action('wp_ajax_sflmcp_oauth_reset_state', array($this, 'ajax_oauth_reset_state'));
 			add_action('wp_ajax_sflmcp_oauth_save_settings', array($this, 'ajax_oauth_save_settings'));
+			add_action('wp_ajax_sflmcp_oauth_approve_client', array($this, 'ajax_oauth_approve_client'));
+			add_action('wp_ajax_sflmcp_oauth_check_header', array($this, 'ajax_oauth_check_header'));
 			add_action('wp_ajax_sflmcp_generate_app_password', array($this, 'ajax_generate_app_password'));
 			add_action('admin_post_sflmcp_download_mcpb_bundle', array($this, 'handleDownloadMcpbBundle'));
 		}
@@ -138,7 +146,7 @@ class StifliFlexMcp {
 			'canAccessMCP: %s %s | Auth: %s | User-Agent: %s',
 			$req_method,
 			$req_route,
-			$auth_hdr ? substr( $auth_hdr, 0, 20 ) . '...' : '(none)',
+			$auth_hdr ? '(present)' : '(none)',
 			$request->get_header( 'User-Agent' ) ?: '(none)'
 		) );
 		$this->traceMcpRequest('canAccessMCP/entry', array(
@@ -166,25 +174,6 @@ class StifliFlexMcp {
 			}
 		}
 
-		// --- Rate limiting: 30 requests/minute per IP ---
-		$ip = isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : '0.0.0.0';
-		$rate_key = 'sflmcp_rate_' . md5( $ip );
-		$rate_data = get_transient( $rate_key );
-		if ( false === $rate_data ) {
-			$rate_data = array( 'count' => 0, 'start' => time() );
-		}
-		$rate_data['count']++;
-		$window = 60; // seconds
-		$limit  = 30; // max requests per window
-		if ( ( time() - $rate_data['start'] ) > $window ) {
-			// Window expired, reset.
-			$rate_data = array( 'count' => 1, 'start' => time() );
-		} elseif ( $rate_data['count'] > $limit ) {
-			stifli_flex_mcp_log( sprintf( 'canAccessMCP: Rate limit exceeded for IP %s (%d requests in %ds)', $ip, $rate_data['count'], time() - $rate_data['start'] ) );
-			return new WP_Error( 'rate_limit_exceeded', 'Rate limit exceeded. Max ' . $limit . ' requests per minute.', array( 'status' => 429 ) );
-		}
-		set_transient( $rate_key, $rate_data, $window );
-
 		// --- OAuth 2.1 Bearer token validation ---
 		$auth_header = $auth_hdr;
 		if ( $auth_header && stripos( $auth_header, 'Bearer ' ) === 0 ) {
@@ -201,10 +190,14 @@ class StifliFlexMcp {
 						StifliFlexMcp_ChangeTracker::setSourceContext( 'mcp', $client_label );
 					}
 
-					return true;
+					return StifliFlexMcpUtils::checkRateLimit( 'user:' . $oauth_user_id, apply_filters( 'sflmcp_authenticated_rate_limit', 180 ) );
 				}
 			}
 			// Bearer token present but invalid → 401.
+			$rate = StifliFlexMcpUtils::checkRateLimit( 'anonymous:' . StifliFlexMcpUtils::getClientIp(), 30 );
+			if ( is_wp_error( $rate ) ) {
+				return $rate;
+			}
 			stifli_flex_mcp_log( 'canAccessMCP: Invalid OAuth Bearer token' );
 			return new WP_Error( 'invalid_token', 'Invalid or expired Bearer token.', array( 'status' => 401 ) );
 		}
@@ -213,7 +206,11 @@ class StifliFlexMcp {
 		
 		if ($current_user_id > 0 && current_user_can('edit_posts')) {
 			stifli_flex_mcp_log(sprintf('canAccessMCP: user %d has sufficient capabilities', $current_user_id));
-			return true;
+			return StifliFlexMcpUtils::checkRateLimit( 'user:' . $current_user_id, apply_filters( 'sflmcp_authenticated_rate_limit', 180 ) );
+		}
+		$rate = StifliFlexMcpUtils::checkRateLimit( 'anonymous:' . StifliFlexMcpUtils::getClientIp(), 30 );
+		if ( is_wp_error( $rate ) ) {
+			return $rate;
 		}
 		
 		stifli_flex_mcp_log('canAccessMCP: Access denied - no authenticated user with edit_posts capability');
@@ -372,7 +369,7 @@ class StifliFlexMcp {
 	}
 
 	private function getSupportedProtocolVersions(): array {
-		return array('2025-11-25', '2025-06-18', '2025-03-26');
+		return array('2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26');
 	}
 
 	private function isSupportedProtocolVersion( $version ): bool {
@@ -383,10 +380,48 @@ class StifliFlexMcp {
 	}
 
 	private function negotiateProtocolVersion( $requestedVersion ): string {
-		if ($this->isSupportedProtocolVersion($requestedVersion)) {
+		if ('2026-07-28' !== $requestedVersion && $this->isSupportedProtocolVersion($requestedVersion)) {
 			return $requestedVersion;
 		}
 		return $this->protocolVersion;
+	}
+
+	private function getServerInfo( string $protocolVersion ) {
+		$serverInfo = array(
+			'name' => get_bloginfo('name') . ' Flex MCP',
+			'version' => $this->serverVersion,
+		);
+
+		if ( in_array( $protocolVersion, array( '2025-11-25', '2026-07-28' ), true ) ) {
+			$site_url = home_url( '/' );
+			$site = wp_parse_url( $site_url );
+			$site_label = StifliFlexMcpUtils::getArrayValue( $site, 'host', '' );
+			if ( isset( $site['port'] ) ) {
+				$site_label .= ':' . $site['port'];
+			}
+			$site_label .= rtrim( StifliFlexMcpUtils::getArrayValue( $site, 'path', '' ), '/' );
+			$serverInfo['title'] = $serverInfo['name'] . ' (' . $site_label . ')';
+			$serverInfo['websiteUrl'] = $site_url;
+			$serverInfo['description'] = 'WordPress site: ' . $site_url;
+		}
+
+		if ( in_array( $protocolVersion, array( '2025-11-25', '2026-07-28' ), true ) && function_exists( 'get_site_icon_url' ) ) {
+			$iconUrl = get_site_icon_url( 512 );
+			if ( $iconUrl ) {
+				$icon = array(
+					'src' => esc_url_raw( $iconUrl ),
+					'sizes' => array( '512x512' ),
+				);
+				$iconId = function_exists( 'get_option' ) ? absint( get_option( 'site_icon', 0 ) ) : 0;
+				$mimeType = $iconId ? get_post_mime_type( $iconId ) : '';
+				if ( is_string( $mimeType ) && '' !== $mimeType ) {
+					$icon['mimeType'] = $mimeType;
+				}
+				$serverInfo['icons'] = array( $icon );
+			}
+		}
+
+		return (object) $serverInfo;
 	}
 
 	private function getProtocolVersionHeader( $request ) {
@@ -423,6 +458,10 @@ class StifliFlexMcp {
 		foreach ($this->getNoCacheHeaders() as $name => $value) {
 			$response->header($name, $value);
 		}
+		if ( method_exists( $response, 'get_status' ) && 429 === $response->get_status() ) {
+			$body = $response->get_data();
+			$response->header( 'Retry-After', (string) max( 1, (int) StifliFlexMcpUtils::getArrayValue( StifliFlexMcpUtils::getArrayValue( $body, 'data', array() ), 'retry_after', 60 ) ) );
+		}
 		return $response;
 	}
 
@@ -442,11 +481,11 @@ class StifliFlexMcp {
 		if (0 !== strpos($route, $prefix)) {
 			return $response;
 		}
-
-		foreach ($this->getNoCacheHeaders() as $name => $value) {
-			$response->header($name, $value);
+		if ( $response instanceof WP_REST_Response && in_array( $route, array( $prefix . '/sse', $prefix . '/messages' ), true ) ) {
+			StifliFlexMcpUtils::recordProtocolUsage( $request, $response );
 		}
-		return $response;
+
+		return $response instanceof WP_REST_Response ? $this->withNoCacheHeaders( $response ) : $response;
 	}
 
 	private function withProtocolHeaders( WP_REST_Response $response, string $protocolVersion, bool $hasJsonBody = true ): WP_REST_Response {
@@ -463,6 +502,169 @@ class StifliFlexMcp {
 
 	private function getTaskManagedTools(): array {
 		return array('wp_generate_image', 'wp_generate_video');
+	}
+
+	private function usesModernProtocol( $request, array $data ): bool {
+		$meta = StifliFlexMcpUtils::getArrayValue( StifliFlexMcpUtils::getArrayValue( $data, 'params', array() ), '_meta', array() );
+		$version = StifliFlexMcpUtils::getArrayValue( $meta, 'io.modelcontextprotocol/protocolVersion', '' );
+		$header = $this->getProtocolVersionHeader( $request );
+		$legacy = array( '2025-11-25', '2025-06-18', '2025-03-26' );
+		return ( '' !== $version && ! in_array( $version, $legacy, true ) )
+			|| ( null !== $header && ! in_array( $header, $legacy, true ) );
+	}
+
+	private function decodeMcpHeader( string $value ) {
+		if ( preg_match( '/[^\x20-\x7e\t]/', $value ) ) {
+			return false;
+		}
+		if ( 0 === strpos( $value, '=?base64?' ) && substr( $value, -2 ) === '?=' ) {
+			return base64_decode( substr( $value, 9, -2 ), true );
+		}
+		return $value;
+	}
+
+	private function modernResponse( $id, string $method, array $reply, int $status = 200 ): WP_REST_Response {
+		if ( array_key_exists( 'result', $reply ) ) {
+			$result = (array) $reply['result'];
+			if ( ! isset( $result['resultType'] ) ) {
+				$result['resultType'] = 'complete';
+			}
+			$result['_meta']['io.modelcontextprotocol/serverInfo'] = $this->getServerInfo( '2026-07-28' );
+			if ( in_array( $method, array( 'server/discover', 'tools/list', 'prompts/list', 'resources/list', 'resources/templates/list', 'resources/read' ), true ) && 'complete' === $result['resultType'] ) {
+				$result['ttlMs'] = 0;
+				$result['cacheScope'] = 'private';
+			}
+			$reply['result'] = $result;
+		}
+		if ( isset( $reply['error'] ) && -32601 === $reply['error']['code'] ) {
+			$status = 404;
+		}
+		if ( isset( $reply['error'] ) && in_array( $reply['error']['code'], array( -32020, -32021, -32022 ), true ) ) {
+			$status = 400;
+		}
+		if ( 'resources/read' === $method && isset( $reply['error'] ) && -32004 === $reply['error']['code'] ) {
+			$reply['error']['code'] = -32602;
+		}
+		$body = array_merge( array( 'jsonrpc' => '2.0', 'id' => $id ), $reply );
+		if ( null === $id ) {
+			unset( $body['id'] );
+		}
+		return $this->withProtocolHeaders( new WP_REST_Response( $body, $status ), '2026-07-28' );
+	}
+
+	private function handleModernJsonRPC( $request, array $data ): WP_REST_Response {
+		$id = StifliFlexMcpUtils::getArrayValue( $data, 'id', null );
+		$method = StifliFlexMcpUtils::getArrayValue( $data, 'method', '' );
+		if ( ! is_string( $method ) || '' === $method || '2.0' !== StifliFlexMcpUtils::getArrayValue( $data, 'jsonrpc', '' ) || ( array_key_exists( 'id', $data ) && ! is_string( $id ) && ! is_int( $id ) ) ) {
+			return $this->modernResponse( null, '', array( 'error' => array( 'code' => -32600, 'message' => 'Invalid Request' ) ), 400 );
+		}
+		$params = StifliFlexMcpUtils::getArrayValue( $data, 'params', array() );
+		$meta = StifliFlexMcpUtils::getArrayValue( $params, '_meta', array() );
+		$version = StifliFlexMcpUtils::getArrayValue( $meta, 'io.modelcontextprotocol/protocolVersion', '' );
+		$header = $this->getProtocolVersionHeader( $request );
+		$name = StifliFlexMcpUtils::getArrayValue( $params, 'resources/read' === $method ? 'uri' : 'name', null );
+		$requires_name = in_array( $method, array( 'tools/call', 'resources/read', 'prompts/get' ), true );
+		if ( null === $header || $header !== $version || $method !== $request->get_header( 'Mcp-Method' )
+			|| ( $requires_name && ( ! is_string( $name ) || '' === $name || $name !== $this->decodeMcpHeader( (string) $request->get_header( 'Mcp-Name' ) ) ) ) ) {
+			return $this->modernResponse( $id, $method, array( 'error' => array( 'code' => -32020, 'message' => 'Missing, malformed or mismatched MCP request headers.' ) ), 400 );
+		}
+		if ( '2026-07-28' !== $version ) {
+			return $this->modernResponse( $id, $method, array( 'error' => array( 'code' => -32022, 'message' => 'Unsupported protocol version', 'data' => array( 'supported' => $this->getSupportedProtocolVersions(), 'requested' => $version ) ) ), 400 );
+		}
+		$capabilities = StifliFlexMcpUtils::getArrayValue( $meta, 'io.modelcontextprotocol/clientCapabilities', null );
+		$raw = json_decode( $request->get_body() );
+		$raw_meta = isset( $raw->params->_meta ) ? $raw->params->_meta : null;
+		$raw_capabilities = is_object( $raw_meta ) && isset( $raw_meta->{'io.modelcontextprotocol/clientCapabilities'} ) ? $raw_meta->{'io.modelcontextprotocol/clientCapabilities'} : null;
+		if ( ! is_array( $params ) || ! is_array( $meta ) || ! is_array( $capabilities ) || ! is_object( $raw_capabilities ) ) {
+			return $this->modernResponse( $id, $method, array( 'error' => array( 'code' => -32602, 'message' => 'params._meta.clientCapabilities must be an object.' ) ), 400 );
+		}
+		if ( property_exists( $raw_capabilities, 'extensions' ) ) {
+			if ( ! is_object( $raw_capabilities->extensions ) ) {
+				return $this->modernResponse( $id, $method, $this->rpcError( $id, -32602, 'extensions must be an object.' ), 400 );
+			}
+			foreach ( $raw_capabilities->extensions as $extension ) {
+				if ( ! is_object( $extension ) ) {
+					return $this->modernResponse( $id, $method, $this->rpcError( $id, -32602, 'Extension settings must be objects.' ), 400 );
+				}
+			}
+		}
+		if ( ! array_key_exists( 'id', $data ) ) {
+			return $this->withProtocolHeaders( new WP_REST_Response( null, 202 ), $version, false );
+		}
+		$this->primeActiveConnectionContext( $request, 'streamable_http' );
+		$this->activeConnectionContext['protocol_version'] = $version;
+		$client = StifliFlexMcpUtils::getArrayValue( $meta, 'io.modelcontextprotocol/clientInfo', array() );
+		if ( class_exists( 'StifliFlexMcp_ChangeTracker' ) ) {
+			StifliFlexMcp_ChangeTracker::getInstance()->setSessionId( 'mcp-' . wp_generate_uuid4() );
+			$client_name = StifliFlexMcpUtils::getArrayValue( $client, 'name', '' );
+			if ( is_string( $client_name ) && '' !== $client_name ) {
+				StifliFlexMcp_ChangeTracker::setSourceContext( 'mcp', sanitize_text_field( $client_name ) );
+			}
+		}
+		try {
+			switch ( $method ) {
+				case 'server/discover':
+					$reply = array( 'result' => array(
+						'supportedVersions' => $this->getSupportedProtocolVersions(),
+						'capabilities' => array( 'tools' => (object) array(), 'resources' => (object) array(), 'prompts' => (object) array(), 'extensions' => array( 'io.modelcontextprotocol/tasks' => (object) array() ) ),
+					) );
+					break;
+				case 'tools/list':
+					$tools = $this->getToolsList();
+					usort( $tools, static function( $first, $second ) { return strcmp( $first['name'], $second['name'] ); } );
+					foreach ( $tools as &$definition ) {
+						unset( $definition['execution'] );
+					}
+					unset( $definition );
+					$reply = array( 'result' => array( 'tools' => $tools ) );
+					break;
+				case 'tools/call':
+					if ( array_key_exists( 'arguments', $params ) && ! is_object( $raw->params->arguments ) ) {
+						$reply = $this->rpcError( $id, -32602, 'arguments must be an object.' );
+						break;
+					}
+					unset( $params['task'] );
+					$extensions = StifliFlexMcpUtils::getArrayValue( $capabilities, 'extensions', array() );
+					$task_enabled = is_array( $extensions ) && array_key_exists( 'io.modelcontextprotocol/tasks', $extensions );
+					if ( $task_enabled && $this->toolRequiresTask( $name ) ) {
+						$params['task'] = array();
+					}
+					$reply = $this->handleToolsCallMethod( $id, $params );
+					if ( $task_enabled && isset( $reply['result']['task'] ) ) {
+						$reply['result'] = $this->formatModernTask( $reply['result']['task'], 'task' );
+					}
+					break;
+				case 'tasks/get':
+				case 'tasks/update':
+				case 'tasks/cancel':
+					$extensions = StifliFlexMcpUtils::getArrayValue( $capabilities, 'extensions', array() );
+					if ( ! is_array( $extensions ) || ! array_key_exists( 'io.modelcontextprotocol/tasks', $extensions ) ) {
+						$reply = $this->rpcError( $id, -32021, 'Client must declare io.modelcontextprotocol/tasks.' );
+						$reply['error']['data'] = array( 'requiredCapabilities' => array( 'extensions' => array( 'io.modelcontextprotocol/tasks' => (object) array() ) ) );
+						break;
+					}
+					$reply = $this->handleModernTaskMethod( $method, $params, $id );
+					break;
+				case 'resources/list':
+					$reply = array( 'result' => array( 'resources' => $this->getResourcesList() ) );
+					break;
+				case 'resources/read':
+					$reply = $this->handleResourcesReadMethod( $id, $params );
+					break;
+				case 'resources/templates/list':
+					$reply = array( 'result' => array( 'resourceTemplates' => array() ) );
+					break;
+				case 'prompts/list':
+					$reply = array( 'result' => array( 'prompts' => $this->getPromptsList() ) );
+					break;
+				default:
+					$reply = $this->rpcError( $id, -32601, 'Method not found: ' . $method );
+			}
+			return $this->modernResponse( $id, $method, $reply );
+		} catch ( Throwable $exception ) {
+			stifli_flex_mcp_log( 'MCP request failed: ' . $exception->getMessage() );
+			return $this->modernResponse( $id, $method, array( 'error' => array( 'code' => -32603, 'message' => 'Internal error' ) ), 500 );
+		}
 	}
 
 	private function toolRequiresTask( $tool ): bool {
@@ -487,7 +689,7 @@ class StifliFlexMcp {
 		if (!$this->isVerboseTraceEnabled()) {
 			return;
 		}
-		$encoded = wp_json_encode($payload);
+		$encoded = wp_json_encode(StifliFlexMcpUtils::redactSecrets($payload));
 		if (false === $encoded) {
 			$encoded = '[unserializable]';
 		}
@@ -501,7 +703,7 @@ class StifliFlexMcp {
 		if (!$this->isVerboseTraceEnabled()) {
 			return;
 		}
-		$encoded = wp_json_encode($payload);
+		$encoded = wp_json_encode(StifliFlexMcpUtils::redactSecrets($payload));
 		if (false === $encoded) {
 			$encoded = '[unserializable]';
 		}
@@ -756,11 +958,56 @@ class StifliFlexMcp {
 		}
 		$currentUserId = get_current_user_id();
 		$ownerUserId = isset($task['ownerUserId']) ? (int) $task['ownerUserId'] : 0;
-		if ($ownerUserId > 0 && $currentUserId > 0 && $ownerUserId !== $currentUserId) {
+		if ($ownerUserId <= 0 || $currentUserId <= 0 || $ownerUserId !== $currentUserId) {
 			$errorReply = $this->rpcError($id, -32602, 'Failed to retrieve task: Task not found');
 			return null;
 		}
 		return $task;
+	}
+
+	private function formatModernTask( array $task, string $result_type = 'complete' ): array {
+		$result = $this->formatTaskForResult( $task );
+		$result['resultType'] = $result_type;
+		$result['ttlMs'] = $result['ttl'];
+		$result['pollIntervalMs'] = $result['pollInterval'];
+		unset( $result['ttl'], $result['pollInterval'] );
+		$payload = StifliFlexMcpUtils::getArrayValue( $task, 'payload', array() );
+		if ( in_array( $result['status'], array( 'completed', 'failed' ), true ) && isset( $payload['result'] ) ) {
+			$result['status'] = 'completed';
+			$result['result'] = $payload['result'];
+			$result['result']['resultType'] = 'complete';
+		} elseif ( 'failed' === $result['status'] ) {
+			$result['error'] = StifliFlexMcpUtils::getArrayValue( $payload, 'error', array( 'code' => -32603, 'message' => 'Task failed.' ) );
+			if ( ! is_int( $result['error']['code'] ) ) {
+				$result['error']['code'] = -32603;
+			}
+		}
+		return $result;
+	}
+
+	private function handleModernTaskMethod( string $method, array $params, $id ): array {
+		$task_id = StifliFlexMcpUtils::getArrayValue( $params, 'taskId', '' );
+		if ( ! is_string( $task_id ) || '' === $task_id ) {
+			return $this->rpcError( $id, -32602, 'taskId is required.' );
+		}
+		$error = null;
+		$task = $this->getScopedTaskRecord( $task_id, $id, $error );
+		if ( ! is_array( $task ) ) {
+			return $error;
+		}
+		if ( 'tasks/get' === $method ) {
+			return array( 'result' => $this->formatModernTask( $task ) );
+		}
+		if ( 'tasks/update' === $method && ! is_array( StifliFlexMcpUtils::getArrayValue( $params, 'inputResponses', null ) ) ) {
+			return $this->rpcError( $id, -32602, 'inputResponses must be an object.' );
+		}
+		if ( 'tasks/cancel' === $method && ! $this->isTaskTerminalStatus( $task['status'] ) ) {
+			$task['status'] = 'cancelled';
+			$task['lastUpdatedAt'] = $this->nowIso8601();
+			$task['statusMessage'] = 'Cancellation requested.';
+			$this->saveTaskRecord( $task );
+		}
+		return array( 'result' => array( 'resultType' => 'complete' ) );
 	}
 
 	private function createToolTaskResult( $id, string $tool, array $arguments, array $params ): array {
@@ -1032,7 +1279,7 @@ class StifliFlexMcp {
 		if (false === $toolLog) {
 			$toolLog = is_scalar($tool) ? (string) $tool : '[unserializable]';
 		}
-		$argsLog = wp_json_encode($arguments);
+		$argsLog = wp_json_encode(StifliFlexMcpUtils::redactSecrets(StifliFlexMcpUtils::redactToolArguments($tool, $arguments)));
 		if (false === $argsLog) {
 			$argsLog = '[unserializable]';
 		}
@@ -1040,7 +1287,7 @@ class StifliFlexMcp {
 		$this->traceMcpRequest('tools-call/parsed', array(
 			'id' => $id,
 			'tool' => is_scalar($tool) ? (string) $tool : '',
-			'arguments' => $arguments,
+			'arguments' => StifliFlexMcpUtils::redactSecrets(StifliFlexMcpUtils::redactToolArguments($tool, $arguments)),
 			'task_augmented' => $isTaskAugmented,
 		));
 		if ('wp_create_post' === $tool) {
@@ -1087,9 +1334,10 @@ class StifliFlexMcp {
 		stifli_flex_mcp_log(sprintf('handleSSE start: remote=%s, method=%s, auth_header=%s, query_token=%s, body_len=%d, ua=%s', $remote, $request->get_method(), $hdrAuth, $qp, strlen($body), $ua));
 		if ($request->get_method() === 'POST' && !empty($body)) {
 			$data = json_decode($body, true);
-			if ($data && isset($data['method'])) {
-				return $this->handleDirectJsonRPC($request, $data);
-			}
+			return $this->handleDirectJsonRPC($request, $data);
+		}
+		if ( $this->usesModernProtocol( $request, array() ) ) {
+			return $this->handleMessagesGet( $request );
 		}
 		if ( function_exists( 'ini_set' ) ) {
 			ini_set('zlib.output_compression', '0'); // phpcs:ignore WordPress.PHP.DiscouragedFunctions.runtime_ini_set,Squiz.PHP.DiscouragedFunctions.Discouraged
@@ -1156,7 +1404,7 @@ class StifliFlexMcp {
 			// SSE data is consumed by MCP clients (not HTML context).
 			// wp_json_encode handles safe encoding; esc_html would break JSON
 			// by converting " to &quot;.  phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
-			$data = null === $data ? '{}' : str_replace('[]', '{}', wp_json_encode($data, JSON_UNESCAPED_UNICODE));
+			$data = null === $data ? '{}' : wp_json_encode($data, JSON_UNESCAPED_UNICODE);
 		}
 		// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- SSE text/event-stream data, not HTML context
 		echo 'data: ' . $data . "\n\n";
@@ -1168,6 +1416,12 @@ class StifliFlexMcp {
 	}
 
 	public function handleDirectJsonRPC( $request, $data ) {
+		if ( json_last_error() !== JSON_ERROR_NONE || ! is_array( $data ) ) {
+			return new WP_REST_Response( array( 'jsonrpc' => '2.0', 'id' => null, 'error' => array( 'code' => -32700, 'message' => 'Parse error: invalid JSON' ) ), 400 );
+		}
+		if ( $this->usesModernProtocol( $request, $data ) ) {
+			return $this->handleModernJsonRPC( $request, $data );
+		}
 			$this->primeActiveConnectionContext( $request, 'direct_jsonrpc', (string) $request->get_param( 'session_id' ) );
 		$id = isset($data['id']) ? $data['id'] : null;
 		$method = isset($data['method']) ? $data['method'] : null;
@@ -1250,12 +1504,9 @@ class StifliFlexMcp {
 						'id' => $id,
 						'result' => array(
 							'protocolVersion' => $replyProtocolVersion,
-							'serverInfo' => (object) array(
-								'name' => get_bloginfo('name') . ' StifliFlexMcp',
-								'version' => $this->serverVersion,
-							),
+							'serverInfo' => $this->getServerInfo( $replyProtocolVersion ),
 							'capabilities' => array(
-								'tools' => array('listChanged' => true),
+								'tools' => array('listChanged' => false),
 								'prompts' => array('subscribe' => false, 'listChanged' => false),
 								'resources' => array('subscribe' => false, 'listChanged' => false),
 								'tasks' => array(
@@ -1325,7 +1576,7 @@ class StifliFlexMcp {
 					$reply = array(
 						'jsonrpc' => '2.0',
 						'id' => $id,
-						'error' => array('code' => -44001, 'message' => "Method not found: {$method}"),
+						'error' => array('code' => -32601, 'message' => "Method not found: {$method}"),
 					);
 			}
 			$this->traceMcpRequest('direct-rpc/reply', array(
@@ -1360,6 +1611,10 @@ class StifliFlexMcp {
 	}
 
 	public function handleMessage( $request ) {
+		$decoded = json_decode( $request->get_body(), true );
+		if ( ! $request->get_param( 'session_id' ) || ( is_array( $decoded ) && $this->usesModernProtocol( $request, $decoded ) ) ) {
+			return $this->handleDirectJsonRPC( $request, $decoded );
+		}
 		   $sess = sanitize_text_field($request->get_param('session_id'));
 		   $this->primeActiveConnectionContext( $request, 'messages_post', $sess );
 		   $body = $request->get_body();
@@ -1372,20 +1627,17 @@ class StifliFlexMcp {
 			   'header_auth' => $hdr,
 			   'query_token' => $qp,
 			   'body_len' => strlen($body),
-			   'body_sample' => substr((string) $body, 0, 1400),
 		   ));
 		   if (false !== strpos((string) $body, 'wp_create_post')) {
 			   $this->traceWpCreatePost('messages/entry-body-hit', array(
 				   'session' => $sess,
 				   'remote' => $remote,
 				   'body_len' => strlen($body),
-				   'body_sample' => substr((string) $body, 0, 1400),
 			   ));
 		   }
 		   stifli_flex_mcp_log(sprintf('handleMessage: session=%s remote=%s header=%s query=%s body_len=%d', $sess, $remote, $hdr, $qp, strlen($body)));
-		   stifli_flex_mcp_log('handleMessage: RAW BODY: ' . $body);
 		   $data = json_decode($body, true);
-		   $decodedForLog = wp_json_encode($data);
+		   $decodedForLog = wp_json_encode(StifliFlexMcpUtils::redactSecrets($data));
 		   if (false === $decodedForLog) {
 			   $decodedForLog = '[unserializable]';
 		   }
@@ -1447,10 +1699,7 @@ class StifliFlexMcp {
 
 		// Pass session_id to ChangeTracker for grouping
 		if ( class_exists( 'StifliFlexMcp_ChangeTracker' ) ) {
-			if ( ! $sess ) {
-				$sess = 'sse-' . wp_generate_uuid4();
-			}
-			StifliFlexMcp_ChangeTracker::getInstance()->setSessionId( $sess );
+			StifliFlexMcp_ChangeTracker::getInstance()->setSessionId( $sess ?: 'sse-' . wp_generate_uuid4() );
 		}
 
 		try {
@@ -1475,12 +1724,9 @@ class StifliFlexMcp {
 						'id' => $id,
 						'result' => array(
 							'protocolVersion' => $replyProtocolVersion,
-							'serverInfo' => (object) array(
-								'name' => get_bloginfo( 'name' ) . ' StifliFlexMcp',
-								'version' => $this->serverVersion,
-							),
+							'serverInfo' => $this->getServerInfo( $replyProtocolVersion ),
 							'capabilities' => array(
-								'tools' => array('listChanged' => true),
+								'tools' => array('listChanged' => false),
 								'prompts' => array('subscribe' => false, 'listChanged' => false),
 								'resources' => array('subscribe' => false, 'listChanged' => false),
 								'tasks' => array(
@@ -1541,7 +1787,7 @@ class StifliFlexMcp {
 					$reply = $this->handleTasksMethod($method, $params, $id);
 					break;
 				default:
-					$reply = $this->rpcError($id, -45601, "Method not found: {$method}");
+					$reply = $this->rpcError($id, -32601, "Method not found: {$method}");
 			}
 			if ($reply) {
 				$this->traceMcpRequest('messages/reply', array(
@@ -1822,7 +2068,7 @@ class StifliFlexMcp {
 			if (false === $toolLog) {
 				$toolLog = is_scalar($tool) ? (string) $tool : '[unserializable]';
 			}
-			$argsLog = wp_json_encode($args);
+			$argsLog = wp_json_encode(StifliFlexMcpUtils::redactSecrets(StifliFlexMcpUtils::redactToolArguments($tool, $args)));
 			if (false === $argsLog) {
 				$argsLog = '[unserializable]';
 			}
@@ -1834,7 +2080,7 @@ class StifliFlexMcp {
 			$this->traceMcpRequest('execute/start', array(
 				'id' => $id,
 				'tool' => is_scalar($tool) ? (string) $tool : '',
-				'args' => is_array($args) ? $args : array(),
+				'args' => is_array($args) ? StifliFlexMcpUtils::redactSecrets(StifliFlexMcpUtils::redactToolArguments($tool, $args)) : array(),
 			));
 			if ('wp_create_post' === $tool) {
 				$this->traceWpCreatePost('execute/start', array(
@@ -2429,8 +2675,8 @@ class StifliFlexMcp {
 	public function registerAdmin() {
 		$top_level_callback = stifli_flex_mcp_addon_enabled( 'ai_chat' ) ? '__return_null' : array($this, 'adminPage');
 		add_menu_page(
-			__('StifLi Flex MCP', 'stifli-flex-mcp'),
-			__('StifLi Flex MCP', 'stifli-flex-mcp'),
+			__('Flex MCP', 'stifli-flex-mcp'),
+			__('Flex MCP', 'stifli-flex-mcp'),
 			'manage_options',
 			'stifli-flex-mcp',
 			$top_level_callback,
@@ -2645,6 +2891,7 @@ class StifliFlexMcp {
 		$result = array(
 			'status' => 'unknown',
 			'blocked' => false,
+			'provider' => '',
 			'url' => $url,
 			'code' => 0,
 			'message' => '',
@@ -2663,7 +2910,14 @@ class StifliFlexMcp {
 
 		$code = (int) wp_remote_retrieve_response_code($response);
 		$body = (string) wp_remote_retrieve_body($response);
+		$server = strtolower((string) wp_remote_retrieve_header($response, 'server'));
+		$sucuriId = (string) wp_remote_retrieve_header($response, 'x-sucuri-id');
+		$sucuriCache = (string) wp_remote_retrieve_header($response, 'x-sucuri-cache');
+		$bodyLower = strtolower($body);
 		$result['code'] = $code;
+		if ('' !== $sucuriId || '' !== $sucuriCache || false !== strpos($server, 'sucuri') || false !== strpos($server, 'cloudproxy') || false !== strpos($bodyLower, 'sucuri website firewall') || false !== strpos($bodyLower, 'cloudproxy')) {
+			$result['provider'] = 'sucuri';
+		}
 
 		if (200 === $code) {
 			$bodyHead = strtolower(ltrim($body));
@@ -2710,7 +2964,11 @@ class StifliFlexMcp {
 			return $cached;
 		}
 
-		$url = home_url('/.well-known/oauth-authorization-server');
+		$url = (string) apply_filters(
+			'stifli_flex_mcp_oauth_metadata_url',
+			home_url('/.well-known/oauth-authorization-server'),
+			'oauth-authorization-server'
+		);
 		$result = array(
 			'status' => 'unknown',
 			'blocked' => false,
@@ -2725,9 +2983,14 @@ class StifliFlexMcp {
 		$result['blocked'] = !empty($primaryProbe['blocked']);
 		$result['code'] = isset($primaryProbe['code']) ? (int) $primaryProbe['code'] : 0;
 		$result['message'] = isset($primaryProbe['message']) ? (string) $primaryProbe['message'] : '';
+		$result['provider'] = isset($primaryProbe['provider']) ? (string) $primaryProbe['provider'] : '';
 
 		if ('ok' !== $result['status']) {
-			$openidUrl = home_url('/.well-known/openid-configuration');
+			$openidUrl = (string) apply_filters(
+				'stifli_flex_mcp_oauth_metadata_url',
+				home_url('/.well-known/openid-configuration'),
+				'openid-configuration'
+			);
 			$openidProbe = $this->probeOAuthMetadataEndpoint($openidUrl);
 			if (isset($openidProbe['status']) && 'ok' === (string) $openidProbe['status']) {
 				$result['status'] = 'ok';
@@ -2735,6 +2998,9 @@ class StifliFlexMcp {
 				$result['url'] = $openidUrl;
 				$result['code'] = isset($openidProbe['code']) ? (int) $openidProbe['code'] : 200;
 				$result['message'] = '';
+				$result['provider'] = '';
+			} elseif (empty($result['provider']) && !empty($openidProbe['provider'])) {
+				$result['provider'] = (string) $openidProbe['provider'];
 			}
 		}
 
@@ -2766,8 +3032,30 @@ class StifliFlexMcp {
 			}
 		}
 
-		set_transient($transientKey, $result, (int) $this->oauthWellKnownProbeTtl);
+		$probeTtl = !empty($result['blocked']) ? 10 * MINUTE_IN_SECONDS : (int) $this->oauthWellKnownProbeTtl;
+		set_transient($transientKey, $result, $probeTtl);
 		return $result;
+	}
+
+	public function handleOAuthWellKnownRecheck() {
+		if (!current_user_can('manage_options')) {
+			return;
+		}
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- nonce verified below.
+		$recheck = isset($_GET['sflmcp_recheck_oauth_well_known']) ? sanitize_text_field(wp_unslash($_GET['sflmcp_recheck_oauth_well_known'])) : '';
+		if ('1' !== $recheck) {
+			return;
+		}
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- nonce is explicitly validated.
+		$nonce = isset($_GET['_sflmcpnonce']) ? sanitize_text_field(wp_unslash($_GET['_sflmcpnonce'])) : '';
+		if (!wp_verify_nonce($nonce, 'sflmcp_recheck_oauth_well_known')) {
+			return;
+		}
+
+		$this->invalidateOAuthWellKnownProbeCache();
+		$redirect = remove_query_arg(array('sflmcp_recheck_oauth_well_known', '_sflmcpnonce'));
+		wp_safe_redirect($redirect);
+		exit;
 	}
 
 	public function handleOAuthWellKnownNoticeDismiss() {
@@ -2807,8 +3095,10 @@ class StifliFlexMcp {
 			return;
 		}
 
-		$allowedScreens = array('stifli-flex-mcp_page_sflmcp-server', 'plugins');
-		if (!in_array((string) $screen->id, $allowedScreens, true)) {
+		$allowedScreens = array('flex-mcp_page_sflmcp-server', 'stifli-flex-mcp_page_sflmcp-server');
+		$page = isset($_GET['page']) ? sanitize_key(wp_unslash($_GET['page'])) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- admin page routing only.
+		$is_mcp_server_screen = in_array((string) $screen->id, $allowedScreens, true) || 'sflmcp-server' === $page;
+		if ('plugins' !== (string) $screen->id && ! $is_mcp_server_screen) {
 			return;
 		}
 		$helpUrl = admin_url('admin.php?page=sflmcp-server&tab=help#troubleshooting');
@@ -2944,12 +3234,23 @@ class StifliFlexMcp {
 			'sflmcp_dismiss_oauth_well_known_notice',
 			'_sflmcpnonce'
 		);
+		$recheckUrl = wp_nonce_url(
+			add_query_arg(array('sflmcp_recheck_oauth_well_known' => '1')),
+			'sflmcp_recheck_oauth_well_known',
+			'_sflmcpnonce'
+		);
 		$endpoint = isset($check['url']) ? (string) $check['url'] : home_url('/.well-known/oauth-authorization-server');
 		$code = isset($check['code']) ? (int) $check['code'] : 0;
 		$status = isset($check['status']) ? (string) $check['status'] : '';
+		$provider = isset($check['provider']) ? (string) $check['provider'] : '';
 		$title = __('OAuth discovery endpoint may be blocked by hosting.', 'stifli-flex-mcp');
 		$description = __('External MCP connectors (Claude/ChatGPT) may fail to open the authorization window if this endpoint is unreachable:', 'stifli-flex-mcp');
-		if ('body_is_html' === $status) {
+		$providerHelpUrl = '';
+		if ('sucuri' === $provider) {
+			$title = __('Sucuri or CloudProxy is blocking OAuth discovery.', 'stifli-flex-mcp');
+			$description = __('Allow the OAuth discovery and registration paths in Sucuri Website Firewall, then re-check the connection:', 'stifli-flex-mcp');
+			$providerHelpUrl = 'https://docs.sucuri.net/website-firewall/troubleshooting/whitelist-and-blacklist/';
+		} elseif ('body_is_html' === $status) {
 			$title = __('OAuth discovery endpoint is returning HTML instead of JSON.', 'stifli-flex-mcp');
 			$description = __('A membership plugin, theme, firewall, or host rule may be intercepting this endpoint before the OAuth metadata reaches the client:', 'stifli-flex-mcp');
 		} elseif ('register_redirect' === $status) {
@@ -2967,7 +3268,11 @@ class StifliFlexMcp {
 				<?php endif; ?>
 			</p>
 			<p>
+				<a class="button button-primary" href="<?php echo esc_url($recheckUrl); ?>"><?php echo esc_html__('Re-check now', 'stifli-flex-mcp'); ?></a>
 				<a class="button button-secondary" href="<?php echo esc_url($helpUrl); ?>"><?php echo esc_html__('View manual fix', 'stifli-flex-mcp'); ?></a>
+				<?php if ('' !== $providerHelpUrl) : ?>
+					<a class="button button-secondary" href="<?php echo esc_url($providerHelpUrl); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html__('Sucuri fix guide', 'stifli-flex-mcp'); ?></a>
+				<?php endif; ?>
 				<a class="button button-link" href="<?php echo esc_url($dismissUrl); ?>"><?php echo esc_html__('Dismiss', 'stifli-flex-mcp'); ?></a>
 			</p>
 		</div>
@@ -2975,7 +3280,7 @@ class StifliFlexMcp {
 	}
 
 	/**
-	 * Show a promotional banner for WP MCP Hub across StifLi Flex MCP admin pages.
+	 * Show a promotional banner for WP MCP Hub across Flex MCP admin pages.
 	 */
 	public function renderWpMcpHubPromoNotice() {
 		if (!current_user_can('manage_options')) {
@@ -3092,7 +3397,7 @@ class StifliFlexMcp {
 	}
 
 	/**
-	 * Detect whether the current admin page belongs to StifLi Flex MCP.
+	 * Detect whether the current admin page belongs to Flex MCP.
 	 *
 	 * @return bool
 	 */
@@ -3150,26 +3455,35 @@ class StifliFlexMcp {
 	 * Enqueue admin scripts and styles
 	 */
 	public function enqueueAdminScripts($hook) {
+		$asset_version = defined( 'SFLMCP_VERSION' ) ? SFLMCP_VERSION : '3.5.4';
+
 		// Load Multimedia page assets on its own page
-		if ($hook === 'stifli-flex-mcp_page_sflmcp-multimedia') {
+		$page = isset($_GET['page']) ? sanitize_key( wp_unslash( $_GET['page'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- admin page routing only.
+		$multimedia_hooks = array('flex-mcp_page_sflmcp-multimedia', 'stifli-flex-mcp_page_sflmcp-multimedia');
+		if (in_array($hook, $multimedia_hooks, true) || 'sflmcp-multimedia' === $page) {
 			$this->enqueueMultimediaAssets();
 			return;
 		}
 
 		$is_top_level_fallback = 'toplevel_page_stifli-flex-mcp' === $hook && ! stifli_flex_mcp_addon_enabled( 'ai_chat' );
-		if ($hook !== 'stifli-flex-mcp_page_sflmcp-server' && ! $is_top_level_fallback) {
+		$is_mcp_server_page = 'sflmcp-server' === $page || ( 'stifli-flex-mcp' === $page && ! stifli_flex_mcp_addon_enabled( 'ai_chat' ) );
+		$mcp_server_hooks = array('flex-mcp_page_sflmcp-server', 'stifli-flex-mcp_page_sflmcp-server');
+		if (!in_array($hook, $mcp_server_hooks, true) && ! $is_top_level_fallback && ! $is_mcp_server_page) {
 			return;
 		}
 
 		// Get active tab early for conditional loading
 		$active_tab = isset($_GET['tab']) ? sanitize_text_field( wp_unslash( $_GET['tab'] ) ) : 'settings'; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		if ( 'oauth' === $active_tab ) {
+			$active_tab = 'settings';
+		}
 
 		// Enqueue Settings tab JavaScript
 		wp_enqueue_script(
 			'sflmcp-admin-settings',
 			plugin_dir_url(__FILE__) . 'assets/admin-settings.js',
 			array(),
-			'1.0.4',
+			$asset_version,
 			true
 		);
 
@@ -3190,7 +3504,7 @@ class StifliFlexMcp {
 			'sflmcp-admin-profiles',
 			plugin_dir_url(__FILE__) . 'assets/admin-profiles.js',
 			array(),
-			'1.0.1',
+			$asset_version,
 			true
 		);
 
@@ -3207,7 +3521,7 @@ class StifliFlexMcp {
 			'sflmcp-admin-styles',
 			plugin_dir_url(__FILE__) . 'assets/admin-styles.css',
 			array(),
-			'1.0.7'
+			$asset_version
 		);
 
 		// Enqueue Custom Tools assets for legacy tab.
@@ -3221,13 +3535,13 @@ class StifliFlexMcp {
 				'sflmcp-admin-abilities',
 				plugin_dir_url(__FILE__) . 'assets/admin-abilities.css',
 				array(),
-				'1.0.0'
+				$asset_version
 			);
 			wp_enqueue_script(
 				'sflmcp-admin-abilities',
 				plugin_dir_url(__FILE__) . 'assets/admin-abilities.js',
 				array('jquery'),
-				'1.0.0',
+				$asset_version,
 				true
 			);
 			wp_localize_script('sflmcp-admin-abilities', 'sflmcpAbilities', array(
@@ -3268,14 +3582,14 @@ class StifliFlexMcp {
 			wp_enqueue_style(
 				'sflmcp-admin-oauth',
 				plugin_dir_url(__FILE__) . 'assets/admin-oauth.css',
-				array(),
-				'1.0.0'
+				array('sflmcp-admin-styles'),
+				$asset_version
 			);
 			wp_enqueue_script(
 				'sflmcp-admin-oauth',
 				plugin_dir_url(__FILE__) . 'assets/admin-oauth.js',
 				array('jquery'),
-				'1.0.0',
+				$asset_version,
 				true
 			);
 			wp_localize_script('sflmcp-admin-oauth', 'sflmcpOAuth', array(
@@ -3300,7 +3614,7 @@ class StifliFlexMcp {
 				'sflmcp-admin-tools',
 				plugin_dir_url(__FILE__) . 'assets/admin-tools.js',
 				array('jquery'),
-				'1.0.5',
+				$asset_version,
 				true
 			);
 			wp_localize_script('sflmcp-admin-tools', 'sflmcpTools', array(
@@ -3319,36 +3633,15 @@ class StifliFlexMcp {
 	}
 
 	/**
-	 * Enqueue assets used by the Custom Tools UI.
+	 * Ensure shared styles are present for modular tool-management tabs.
 	 */
 	public function enqueueCustomToolsAssets() {
-		return;
-
 		wp_enqueue_style(
-			'sflmcp-admin-custom-tools',
-			plugin_dir_url(__FILE__) . 'assets/admin-custom-tools.css',
+			'sflmcp-admin-styles',
+			plugin_dir_url(__FILE__) . 'assets/admin-styles.css',
 			array(),
-			'1.0.5'
+			defined( 'SFLMCP_VERSION' ) ? SFLMCP_VERSION : '3.5.4'
 		);
-		wp_enqueue_script(
-			'sflmcp-admin-custom-tools',
-			plugin_dir_url(__FILE__) . 'assets/admin-custom-tools.js',
-			array('jquery'),
-			'1.0.5',
-			true
-		);
-		wp_localize_script('sflmcp-admin-custom-tools', 'sflmcpCustom', array(
-			'ajaxUrl' => admin_url('admin-ajax.php'),
-			'nonce' => wp_create_nonce('sflmcp_custom_tools'),
-			'i18n' => array(
-				'confirmDelete' => __('Are you sure you want to delete this tool?', 'stifli-flex-mcp'),
-				'errorSaving' => __('Error saving tool', 'stifli-flex-mcp'),
-				'saved' => __('Tool saved successfully', 'stifli-flex-mcp'),
-				'testing' => __('Testing...', 'stifli-flex-mcp'),
-				'success' => __('Success', 'stifli-flex-mcp'),
-				'failed' => __('Failed', 'stifli-flex-mcp'),
-			),
-		));
 	}
 
 	/**
@@ -3361,6 +3654,9 @@ class StifliFlexMcp {
 		
 		// Get active tab
 		$active_tab = isset($_GET['tab']) ? sanitize_text_field( wp_unslash( $_GET['tab'] ) ) : 'settings'; // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- tab selection is a read-only navigation parameter
+		if ( 'oauth' === $active_tab ) {
+			$active_tab = 'settings';
+		}
 		
 		$tabs = array(
 			'settings' => __('Settings', 'stifli-flex-mcp'),
@@ -3896,8 +4192,10 @@ class StifliFlexMcp {
 								?>
 								<tr>
 									<td class="sflmcp-tools-col-checkbox">
-										<input type="checkbox" class="sflmcp-tool-checkbox" data-id="<?php echo intval($tool['id']); ?>" data-tokens="<?php echo intval($tool['token_estimate']); ?>" data-mode="<?php echo esc_attr($tool_mode); ?>" <?php checked($is_enabled); ?> />
-										<code><?php echo esc_html($tool['tool_name']); ?></code>
+										<div class="sflmcp-tools-col-checkbox-content">
+											<input type="checkbox" class="sflmcp-tool-checkbox" data-id="<?php echo intval($tool['id']); ?>" data-tokens="<?php echo intval($tool['token_estimate']); ?>" data-mode="<?php echo esc_attr($tool_mode); ?>" <?php checked($is_enabled); ?> />
+											<code><?php echo esc_html($tool['tool_name']); ?></code>
+										</div>
 									</td>
 									<td class="sflmcp-tools-col-desc"><?php echo esc_html($tool['tool_description']); ?></td>
 									<td class="sflmcp-tools-col-mode"><span class="sflmcp-tool-mode-badge <?php echo esc_attr($mode_class); ?>"><?php echo esc_html($tool_mode); ?></span></td>
@@ -4043,8 +4341,10 @@ class StifliFlexMcp {
 								?>
 								<tr>
 									<td class="sflmcp-tools-col-checkbox">
-										<input type="checkbox" class="sflmcp-tool-checkbox" data-id="<?php echo intval($tool['id']); ?>" data-tokens="<?php echo intval($tool['token_estimate']); ?>" data-mode="<?php echo esc_attr($tool_mode); ?>" <?php checked($is_enabled); ?> />
-										<code><?php echo esc_html($tool['tool_name']); ?></code>
+										<div class="sflmcp-tools-col-checkbox-content">
+											<input type="checkbox" class="sflmcp-tool-checkbox" data-id="<?php echo intval($tool['id']); ?>" data-tokens="<?php echo intval($tool['token_estimate']); ?>" data-mode="<?php echo esc_attr($tool_mode); ?>" <?php checked($is_enabled); ?> />
+											<code><?php echo esc_html($tool['tool_name']); ?></code>
+										</div>
 									</td>
 									<td class="sflmcp-tools-col-desc"><?php echo esc_html($tool['tool_description']); ?></td>
 									<td class="sflmcp-tools-col-mode"><span class="sflmcp-tool-mode-badge <?php echo esc_attr($mode_class); ?>"><?php echo esc_html($tool_mode); ?></span></td>
@@ -4594,7 +4894,7 @@ class StifliFlexMcp {
 		$test_args = array(
 			'test' => true,
 			'timestamp' => time(),
-			'source' => 'StifLi Flex MCP Test'
+			'source' => 'Flex MCP Test'
 		);
 		
 		$args = array(
@@ -5469,17 +5769,18 @@ class StifliFlexMcp {
 	 * Enqueue assets for the Multimedia submenu page.
 	 */
 	private function enqueueMultimediaAssets() {
+		$asset_version = defined( 'SFLMCP_VERSION' ) ? SFLMCP_VERSION : '3.5.4';
 		wp_enqueue_style(
 			'sflmcp-admin-multimedia',
 			plugin_dir_url(__FILE__) . 'assets/admin-multimedia.css',
 			array(),
-			'1.4.0'
+			$asset_version
 		);
 		wp_enqueue_script(
 			'sflmcp-admin-multimedia',
 			plugin_dir_url(__FILE__) . 'assets/admin-multimedia.js',
 			array('jquery'),
-			'1.7.0',
+			$asset_version,
 			true
 		);
 		wp_localize_script('sflmcp-admin-multimedia', 'sflmcpMultimedia', array(
@@ -6523,17 +6824,23 @@ class StifliFlexMcp {
 			<div class="sflmcp-oauth-settings">
 				<label>
 					<input type="checkbox" id="sflmcp_oauth_auto_approve" value="1" <?php checked( $auto_approve, '1' ); ?>>
-					<strong><?php esc_html_e( 'Auto-approve new client registrations', 'stifli-flex-mcp' ); ?></strong>
+					<strong><?php esc_html_e( 'Allow dynamic client registration', 'stifli-flex-mcp' ); ?></strong>
 				</label>
 				<p class="description">
 					<?php esc_html_e( 'When enabled, any MCP client (Claude Desktop, ChatGPT, etc.) can register automatically via Dynamic Client Registration. When disabled, clients must be manually registered by an administrator.', 'stifli-flex-mcp' ); ?>
 				</p>
+				<p><label><input type="checkbox" id="sflmcp_oauth_require_approval" value="1" <?php checked( get_option( 'sflmcp_oauth_require_approval', '0' ), '1' ); ?>> <?php esc_html_e( 'Require administrator approval for new clients', 'stifli-flex-mcp' ); ?></label></p>
+				<button type="button" class="button sflmcp-oauth-check-header"><span class="dashicons dashicons-shield" aria-hidden="true"></span> <?php esc_html_e( 'Check Authorization header', 'stifli-flex-mcp' ); ?></button>
 			</div>
 
 			<!-- OAuth Endpoints Reference -->
 			<div class="sflmcp-oauth-endpoints">
 				<h3><?php esc_html_e( 'OAuth Endpoints', 'stifli-flex-mcp' ); ?></h3>
 				<table>
+					<tr>
+						<td><?php esc_html_e( 'REST Discovery', 'stifli-flex-mcp' ); ?></td>
+						<td><code><?php echo esc_html( rest_url( 'stifli-flex-mcp/v1/.well-known/oauth-authorization-server' ) ); ?></code></td>
+					</tr>
 					<tr>
 						<td><?php esc_html_e( 'Resource Metadata', 'stifli-flex-mcp' ); ?></td>
 						<td><code><?php echo esc_html( home_url( '/.well-known/oauth-protected-resource' ) ); ?></code></td>
@@ -6594,6 +6901,9 @@ class StifliFlexMcp {
 							<tr>
 								<td>
 									<strong><?php echo esc_html( $client->client_name ); ?></strong>
+									<?php if ( $storage->client_is_pending( $client->client_id ) ) : ?>
+										<p class="sflmcp-oauth-pending"><?php esc_html_e( 'Pending approval', 'stifli-flex-mcp' ); ?></p>
+									<?php endif; ?>
 									<?php if ( $client->client_uri ) : ?>
 										<br><small><a href="<?php echo esc_url( $client->client_uri ); ?>" target="_blank" rel="noopener"><?php echo esc_html( $client->client_uri ); ?></a></small>
 									<?php endif; ?>
@@ -6627,6 +6937,9 @@ class StifliFlexMcp {
 									<button type="button" class="button button-link-delete sflmcp-oauth-delete-client" data-client-id="<?php echo esc_attr( $cid ); ?>">
 										<?php esc_html_e( 'Delete', 'stifli-flex-mcp' ); ?>
 									</button>
+									<?php if ( $storage->client_is_pending( $client->client_id ) ) : ?>
+										<button type="button" class="button sflmcp-oauth-approve-client" data-client-id="<?php echo esc_attr( $cid ); ?>"><?php esc_html_e( 'Approve', 'stifli-flex-mcp' ); ?></button>
+									<?php endif; ?>
 								</td>
 							</tr>
 							<!-- Expandable tokens row -->
@@ -6882,9 +7195,40 @@ class StifliFlexMcp {
 
 		$auto_approve = isset( $_POST['auto_approve'] ) ? sanitize_text_field( wp_unslash( $_POST['auto_approve'] ) ) : '0';
 		update_option( 'sflmcp_oauth_auto_approve', $auto_approve === '1' ? '1' : '0' );
+		if ( isset( $_POST['require_approval'] ) ) {
+			update_option( 'sflmcp_oauth_require_approval', '1' === $_POST['require_approval'] ? '1' : '0', false );
+		}
 		$this->invalidateOAuthWellKnownProbeCache();
 
 		wp_send_json_success();
+	}
+
+	public function ajax_oauth_approve_client() {
+		check_ajax_referer( 'sflmcp_oauth', 'nonce' );
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Permission denied', 'stifli-flex-mcp' ) ), 403 );
+			return;
+		}
+		$client_id = isset( $_POST['client_id'] ) ? sanitize_text_field( wp_unslash( $_POST['client_id'] ) ) : '';
+		$storage = StifliFlexMcp_OAuth_Storage::get_instance();
+		if ( ! $storage->get_client( $client_id ) ) {
+			wp_send_json_error( array( 'message' => __( 'Client not found', 'stifli-flex-mcp' ) ), 404 );
+			return;
+		}
+		update_option( 'sflmcp_oauth_review_' . hash( 'sha256', $storage::client_storage_id( $client_id ) ), 'approved', false );
+		wp_send_json_success();
+	}
+
+	public function ajax_oauth_check_header() {
+		check_ajax_referer( 'sflmcp_oauth', 'nonce' );
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_send_json_error( array( 'message' => __( 'Permission denied', 'stifli-flex-mcp' ) ), 403 );
+			return;
+		}
+		$received = 'Bearer sflmcp-header-probe' === $this->getAuthorizationHeader( null );
+		wp_send_json_success( array( 'received' => $received, 'message' => $received
+			? __( 'Authorization header received.', 'stifli-flex-mcp' )
+			: __( 'Authorization header missing. Check the proxy, WAF and Apache/nginx forwarding configuration.', 'stifli-flex-mcp' ) ) );
 	}
 
 	/**
@@ -6974,16 +7318,31 @@ class StifliFlexMcp {
 	private function renderHelpTab() {
 		$site_url = site_url();
 		$endpoint = rest_url($this->namespace . '/messages');
+		$model = class_exists( 'StifliFlexMcpModel' ) ? new StifliFlexMcpModel() : null;
+		$enabled_tool_count = $model ? count( $model->getToolsList() ) : 0;
+		$diagnostics = array(
+			'plugin_version' => defined( 'SFLMCP_VERSION' ) ? SFLMCP_VERSION : '',
+			'wordpress_version' => get_bloginfo( 'version' ),
+			'php_version' => PHP_VERSION,
+			'site_https' => is_ssl(),
+			'permalink_structure' => (string) get_option( 'permalink_structure', '' ),
+			'mcp_endpoint' => $endpoint,
+			'oauth_metadata' => home_url( '/.well-known/oauth-authorization-server' ),
+			'enabled_tool_count' => $enabled_tool_count,
+			'wp_debug' => defined( 'WP_DEBUG' ) && WP_DEBUG,
+			'sflmcp_debug' => defined( 'SFLMCP_DEBUG' ) && SFLMCP_DEBUG,
+		);
+		$diagnostic_text = wp_json_encode( $diagnostics, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES );
 		?>
 		
 		<div class="sflmcp-help">
-			<h1>📚 <?php esc_html_e('StifLi Flex MCP - Complete Guide', 'stifli-flex-mcp'); ?></h1>
+			<h1>📚 <?php esc_html_e('Flex MCP - Complete Guide', 'stifli-flex-mcp'); ?></h1>
 			
 			<div class="card toc">
 				<h3>📑 <?php esc_html_e('Table of Contents', 'stifli-flex-mcp'); ?></h3>
 				<ul>
 					<li><a href="#overview">🎯 <?php esc_html_e('What is MCP?', 'stifli-flex-mcp'); ?></a></li>
-					<li><a href="#builtin-tools">🔧 <?php esc_html_e('Built-in Tools (117+)', 'stifli-flex-mcp'); ?></a></li>
+					<li><a href="#builtin-tools">🔧 <?php esc_html_e('Available Tools', 'stifli-flex-mcp'); ?></a></li>
 					<li><a href="#custom-extensions">🔌 <?php esc_html_e('Custom Extensions with Abilities', 'stifli-flex-mcp'); ?></a></li>
 					<li><a href="#use-cases">💡 <?php esc_html_e('Use Cases & Examples', 'stifli-flex-mcp'); ?></a></li>
 					<li><a href="#security">🔐 <?php esc_html_e('Security Considerations', 'stifli-flex-mcp'); ?></a></li>
@@ -6993,18 +7352,18 @@ class StifliFlexMcp {
 
 			<!-- SECTION: Overview -->
 			<h2 id="overview">🎯 <?php esc_html_e('What is MCP (Model Context Protocol)?', 'stifli-flex-mcp'); ?></h2>
-			<p><?php esc_html_e('MCP is an open standard that allows AI assistants (like ChatGPT, Claude, LibreChat) to interact with external tools and services. StifLi Flex MCP transforms your WordPress site into an MCP server, giving AI the ability to:', 'stifli-flex-mcp'); ?></p>
+			<p><?php esc_html_e('MCP is an open standard that allows AI assistants (like ChatGPT, Claude, LibreChat) to interact with external tools and services. Flex MCP transforms your WordPress site into an MCP server, giving AI the ability to:', 'stifli-flex-mcp'); ?></p>
 			<ul>
 				<li>✅ <?php esc_html_e('Create, edit, and delete posts, pages, and custom content', 'stifli-flex-mcp'); ?></li>
 				<li>✅ <?php esc_html_e('Manage WooCommerce products, orders, and customers', 'stifli-flex-mcp'); ?></li>
 				<li>✅ <?php esc_html_e('Upload images (including AI-generated images)', 'stifli-flex-mcp'); ?></li>
-				<li>✅ <?php esc_html_e('Execute any WordPress action hook', 'stifli-flex-mcp'); ?></li>
-				<li>✅ <?php esc_html_e('Connect to external APIs and webhooks', 'stifli-flex-mcp'); ?></li>
+				<li>✅ <?php esc_html_e('Use plugin integrations and registered WordPress Abilities', 'stifli-flex-mcp'); ?></li>
+				<li>✅ <?php esc_html_e('Connect through OAuth 2.1 from compatible MCP clients', 'stifli-flex-mcp'); ?></li>
 			</ul>
 
 			<!-- SECTION: Built-in Tools -->
 			<h2 id="builtin-tools">🔧 <?php esc_html_e('Built-in Tools', 'stifli-flex-mcp'); ?></h2>
-			<p><?php esc_html_e('This plugin comes with 117+ ready-to-use tools:', 'stifli-flex-mcp'); ?></p>
+			<p><?php echo esc_html( sprintf( __( 'This site currently exposes %d enabled tools. Availability changes with profiles, tool settings, and active integrations.', 'stifli-flex-mcp' ), $enabled_tool_count ) ); ?></p>
 			<table>
 				<tr><th><?php esc_html_e('Category', 'stifli-flex-mcp'); ?></th><th><?php esc_html_e('Examples', 'stifli-flex-mcp'); ?></th></tr>
 				<tr><td><strong>Posts & Pages</strong></td><td>wp_get_posts, wp_create_post, wp_update_post, wp_delete_post</td></tr>
@@ -7023,215 +7382,15 @@ class StifliFlexMcp {
 				<p><?php esc_html_e('Use WordPress Abilities to expose custom plugin functionality to MCP clients. Abilities provide explicit schemas and permission callbacks, which is safer than generic HTTP/webhook/action-hook execution.', 'stifli-flex-mcp'); ?></p>
 			</div>
 
-			<?php if ( false ) : ?>
-			<!-- SECTION: Custom Tools Overview -->
-			<h2 id="custom-tools">🔌 <?php esc_html_e('Custom Tools Overview', 'stifli-flex-mcp'); ?></h2>
-			<p><?php esc_html_e('Custom Tools extend the AI\'s capabilities beyond the built-in functions. There are two types:', 'stifli-flex-mcp'); ?></p>
-			
-			<table>
-				<tr>
-					<th><?php esc_html_e('Type', 'stifli-flex-mcp'); ?></th>
-					<th><?php esc_html_e('Badge', 'stifli-flex-mcp'); ?></th>
-					<th><?php esc_html_e('Use Case', 'stifli-flex-mcp'); ?></th>
-				</tr>
-				<tr>
-					<td><strong>HTTP</strong> (GET/POST/PUT/DELETE)</td>
-					<td><span class="badge badge-http">HTTP</span></td>
-					<td><?php esc_html_e('Call external APIs, webhooks (Zapier, Make, n8n), or your site\'s own REST API', 'stifli-flex-mcp'); ?></td>
-				</tr>
-				<tr>
-					<td><strong>ACTION</strong></td>
-					<td><span class="badge badge-action">ACTION</span></td>
-					<td><?php esc_html_e('Execute any WordPress do_action() hook - from core, themes, or any plugin', 'stifli-flex-mcp'); ?></td>
-				</tr>
-			</table>
-
-			<!-- SECTION: WordPress Action Hooks -->
-			<h2 id="action-hooks">⚡ <?php esc_html_e('WordPress Action Hooks (Make Tools from ANY Plugin)', 'stifli-flex-mcp'); ?></h2>
-			
-			<div class="card success">
-				<strong>💡 <?php esc_html_e('Key Concept', 'stifli-flex-mcp'); ?>:</strong>
-				<?php esc_html_e('WordPress plugins communicate through "action hooks" (do_action). With Custom Tools, you can expose ANY of these hooks to the AI!', 'stifli-flex-mcp'); ?>
-			</div>
-
-			<h3><?php esc_html_e('How It Works', 'stifli-flex-mcp'); ?></h3>
-			<ol>
-				<li><?php esc_html_e('You create a Custom Tool with Type = ACTION', 'stifli-flex-mcp'); ?></li>
-				<li><?php esc_html_e('In "Action Hook Name", you put the hook name (e.g., flush_rewrite_rules)', 'stifli-flex-mcp'); ?></li>
-				<li><?php esc_html_e('When the AI calls your tool, the plugin executes: do_action(\'hook_name\', $args)', 'stifli-flex-mcp'); ?></li>
-			</ol>
-
-			<h3><?php esc_html_e('Example: WordPress Core Actions', 'stifli-flex-mcp'); ?></h3>
-			<table>
-				<tr><th><?php esc_html_e('Action Hook', 'stifli-flex-mcp'); ?></th><th><?php esc_html_e('What It Does', 'stifli-flex-mcp'); ?></th></tr>
-				<tr><td><code>flush_rewrite_rules</code></td><td><?php esc_html_e('Regenerate permalink structure', 'stifli-flex-mcp'); ?></td></tr>
-				<tr><td><code>wp_cron</code></td><td><?php esc_html_e('Manually run scheduled tasks', 'stifli-flex-mcp'); ?></td></tr>
-				<tr><td><code>wp_cache_flush</code></td><td><?php esc_html_e('Clear object cache', 'stifli-flex-mcp'); ?></td></tr>
-			</table>
-
-			<h3><?php esc_html_e('Example: WooCommerce Actions', 'stifli-flex-mcp'); ?></h3>
-			<table>
-				<tr><th><?php esc_html_e('Action Hook', 'stifli-flex-mcp'); ?></th><th><?php esc_html_e('What It Does', 'stifli-flex-mcp'); ?></th></tr>
-				<tr><td><code>woocommerce_cancel_unpaid_orders</code></td><td><?php esc_html_e('Cancel orders not paid within hold time', 'stifli-flex-mcp'); ?></td></tr>
-				<tr><td><code>woocommerce_cleanup_sessions</code></td><td><?php esc_html_e('Remove expired customer sessions', 'stifli-flex-mcp'); ?></td></tr>
-				<tr><td><code>woocommerce_scheduled_sales</code></td><td><?php esc_html_e('Process scheduled sale prices', 'stifli-flex-mcp'); ?></td></tr>
-			</table>
-
-			<h3><?php esc_html_e('Example: Popular Plugin Actions', 'stifli-flex-mcp'); ?></h3>
-			<table>
-				<tr><th><?php esc_html_e('Plugin', 'stifli-flex-mcp'); ?></th><th><?php esc_html_e('Action Hook', 'stifli-flex-mcp'); ?></th><th><?php esc_html_e('Effect', 'stifli-flex-mcp'); ?></th></tr>
-				<tr><td>Yoast SEO</td><td><code>wpseo_reindex</code></td><td><?php esc_html_e('Rebuild SEO index', 'stifli-flex-mcp'); ?></td></tr>
-				<tr><td>WP Super Cache</td><td><code>wp_cache_clear_cache</code></td><td><?php esc_html_e('Clear all cache', 'stifli-flex-mcp'); ?></td></tr>
-				<tr><td>W3 Total Cache</td><td><code>w3tc_flush_all</code></td><td><?php esc_html_e('Flush all caches', 'stifli-flex-mcp'); ?></td></tr>
-				<tr><td>WP Rocket</td><td><code>rocket_clean_domain</code></td><td><?php esc_html_e('Purge site cache', 'stifli-flex-mcp'); ?></td></tr>
-				<tr><td>Elementor</td><td><code>elementor/core/files/clear_cache</code></td><td><?php esc_html_e('Clear CSS cache', 'stifli-flex-mcp'); ?></td></tr>
-			</table>
-
-			<!-- SECTION: Finding Plugin Actions -->
-			<h2 id="find-actions">🔍 <?php esc_html_e('How to Find Plugin Action Hooks', 'stifli-flex-mcp'); ?></h2>
-			
-			<div class="card">
-				<h4><?php esc_html_e('Method 1: Plugin Documentation', 'stifli-flex-mcp'); ?></h4>
-				<p><?php esc_html_e('Most quality plugins document their hooks. Search for:', 'stifli-flex-mcp'); ?></p>
-				<ul>
-					<li><code>"[plugin name] action hooks"</code></li>
-					<li><code>"[plugin name] do_action"</code></li>
-					<li><code>"[plugin name] developer documentation"</code></li>
-				</ul>
-			</div>
-
-			<div class="card">
-				<h4><?php esc_html_e('Method 2: Search Plugin Code', 'stifli-flex-mcp'); ?></h4>
-				<p><?php esc_html_e('Search for do_action in the plugin files:', 'stifli-flex-mcp'); ?></p>
-				<pre><code># In your plugin folder, search for hooks:
-grep -r "do_action(" wp-content/plugins/your-plugin/
-
-# Common patterns:
-do_action('plugin_prefix_event_name');
-do_action('plugin_prefix_before_save', $data);
-do_action('plugin_prefix_after_delete', $id);</code></pre>
-			</div>
-
-			<div class="card">
-				<h4><?php esc_html_e('Method 3: Use a Hook Discovery Plugin', 'stifli-flex-mcp'); ?></h4>
-				<p><?php esc_html_e('Install "Query Monitor" or "Debug Bar Actions and Filters" to see all hooks executed on any page.', 'stifli-flex-mcp'); ?></p>
-			</div>
-
-			<div class="card example">
-				<h4>📋 <?php esc_html_e('Step-by-Step Example: Creating an Action Tool', 'stifli-flex-mcp'); ?></h4>
-				<p><?php esc_html_e('Let\'s create a tool that clears WP Rocket cache:', 'stifli-flex-mcp'); ?></p>
-				<ol>
-					<li><?php esc_html_e('Go to Custom Tools → Add New Tool', 'stifli-flex-mcp'); ?></li>
-					<li><strong><?php esc_html_e('Name', 'stifli-flex-mcp'); ?>:</strong> <code>custom_clear_rocket_cache</code></li>
-					<li><strong><?php esc_html_e('Description', 'stifli-flex-mcp'); ?>:</strong> "Clear WP Rocket cache. Use when site shows outdated content."</li>
-					<li><strong><?php esc_html_e('Type', 'stifli-flex-mcp'); ?>:</strong> ACTION (WordPress do_action)</li>
-					<li><strong><?php esc_html_e('Action Hook Name', 'stifli-flex-mcp'); ?>:</strong> <code>rocket_clean_domain</code></li>
-					<li><strong><?php esc_html_e('Parameters', 'stifli-flex-mcp'); ?>:</strong> (none needed)</li>
-					<li><?php esc_html_e('Enable and Save!', 'stifli-flex-mcp'); ?></li>
-				</ol>
-				<p><?php esc_html_e('Now the AI can say: "Clear the cache" and it will work!', 'stifli-flex-mcp'); ?></p>
-			</div>
-
-			<!-- SECTION: Webhooks -->
-			<h2 id="webhooks">🌐 <?php esc_html_e('Webhooks & External APIs', 'stifli-flex-mcp'); ?></h2>
-			
-			<p><?php esc_html_e('Connect your AI to ANY external service using HTTP methods:', 'stifli-flex-mcp'); ?></p>
-
-			<h3><?php esc_html_e('Automation Platforms', 'stifli-flex-mcp'); ?></h3>
-			<table>
-				<tr><th><?php esc_html_e('Platform', 'stifli-flex-mcp'); ?></th><th><?php esc_html_e('Webhook URL Pattern', 'stifli-flex-mcp'); ?></th></tr>
-				<tr><td>Zapier</td><td><code>https://hooks.zapier.com/hooks/catch/...</code></td></tr>
-				<tr><td>Make (Integromat)</td><td><code>https://hook.eu1.make.com/...</code></td></tr>
-				<tr><td>n8n</td><td><code>https://your-n8n.com/webhook/...</code></td></tr>
-				<tr><td>IFTTT</td><td><code>https://maker.ifttt.com/trigger/...</code></td></tr>
-			</table>
-
-			<div class="card example">
-				<h4>📋 <?php esc_html_e('Example: Create a Jira Ticket via Zapier', 'stifli-flex-mcp'); ?></h4>
-				<ol>
-					<li><?php esc_html_e('In Zapier: Create a Zap with "Webhooks by Zapier" trigger → "Jira" action', 'stifli-flex-mcp'); ?></li>
-					<li><?php esc_html_e('Copy the Zapier webhook URL', 'stifli-flex-mcp'); ?></li>
-					<li><?php esc_html_e('In Custom Tools:', 'stifli-flex-mcp'); ?>
-						<ul>
-							<li><strong>Name:</strong> <code>custom_create_jira_ticket</code></li>
-							<li><strong>Type:</strong> POST</li>
-							<li><strong>Endpoint:</strong> (your Zapier URL)</li>
-							<li><strong>Parameters:</strong> title (string, required), description (string), priority (string)</li>
-						</ul>
-					</li>
-				</ol>
-				<p><?php esc_html_e('Now the AI can say: "Create a Jira ticket about the login bug"!', 'stifli-flex-mcp'); ?></p>
-			</div>
-
-			<h3><?php esc_html_e('Public APIs', 'stifli-flex-mcp'); ?></h3>
-			<table>
-				<tr><th><?php esc_html_e('API', 'stifli-flex-mcp'); ?></th><th><?php esc_html_e('Example Endpoint', 'stifli-flex-mcp'); ?></th><th><?php esc_html_e('Use Case', 'stifli-flex-mcp'); ?></th></tr>
-				<tr><td>wttr.in</td><td><code>https://wttr.in/{city}?format=j1</code></td><td><?php esc_html_e('Weather data', 'stifli-flex-mcp'); ?></td></tr>
-				<tr><td>ipapi.co</td><td><code>https://ipapi.co/{ip}/json/</code></td><td><?php esc_html_e('IP geolocation', 'stifli-flex-mcp'); ?></td></tr>
-				<tr><td>OpenAI</td><td><code>https://api.openai.com/v1/...</code></td><td><?php esc_html_e('AI completions', 'stifli-flex-mcp'); ?></td></tr>
-			</table>
-
-			<!-- SECTION: Internal API -->
-			<h2 id="internal-api">🏠 <?php esc_html_e('Internal WordPress REST API', 'stifli-flex-mcp'); ?></h2>
-			
-			<p><?php esc_html_e('Your WordPress site already has a powerful REST API. Use Custom Tools to expose specific endpoints:', 'stifli-flex-mcp'); ?></p>
-
-			<table>
-				<tr><th><?php esc_html_e('Endpoint', 'stifli-flex-mcp'); ?></th><th><?php esc_html_e('What It Returns', 'stifli-flex-mcp'); ?></th></tr>
-				<tr><td><code><?php echo esc_html($site_url); ?>/wp-json/wp/v2/posts</code></td><td><?php esc_html_e('List of posts', 'stifli-flex-mcp'); ?></td></tr>
-				<tr><td><code><?php echo esc_html($site_url); ?>/wp-json/wp/v2/pages/{id}</code></td><td><?php esc_html_e('Single page (with Yoast/RankMath SEO data if installed)', 'stifli-flex-mcp'); ?></td></tr>
-				<tr><td><code><?php echo esc_html($site_url); ?>/wp-json/wc/v3/products</code></td><td><?php esc_html_e('WooCommerce products', 'stifli-flex-mcp'); ?></td></tr>
-				<tr><td><code><?php echo esc_html($site_url); ?>/wp-json/contact-form-7/v1/contact-forms</code></td><td><?php esc_html_e('Contact Form 7 forms', 'stifli-flex-mcp'); ?></td></tr>
-			</table>
-
-			<div class="card warning">
-				<strong>⚠️ <?php esc_html_e('Note on Plugin APIs:', 'stifli-flex-mcp'); ?></strong>
-				<?php esc_html_e('Many plugins add their own REST endpoints. Check their documentation for available endpoints. You can also visit', 'stifli-flex-mcp'); ?> 
-				<code><?php echo esc_html($site_url); ?>/wp-json/</code>
-				<?php esc_html_e('to see all registered namespaces.', 'stifli-flex-mcp'); ?>
-			</div>
-
-			<!-- SECTION: Use Cases -->
-			<h2 id="use-cases">💡 <?php esc_html_e('Real-World Use Cases', 'stifli-flex-mcp'); ?></h2>
-
-			<div class="card">
-				<h4>🛒 <?php esc_html_e('E-commerce Operations', 'stifli-flex-mcp'); ?></h4>
-				<ul>
-					<li><?php esc_html_e('"Cancel all unpaid orders older than 24 hours"', 'stifli-flex-mcp'); ?> → <code>woocommerce_cancel_unpaid_orders</code></li>
-					<li><?php esc_html_e('"Update stock for product SKU-123 to 50 units"', 'stifli-flex-mcp'); ?> → built-in <code>wc_update_stock</code></li>
-					<li><?php esc_html_e('"Create a 20% discount coupon"', 'stifli-flex-mcp'); ?> → built-in <code>wc_create_coupon</code></li>
-				</ul>
-			</div>
-
-			<div class="card">
-				<h4>🔧 <?php esc_html_e('Site Maintenance', 'stifli-flex-mcp'); ?></h4>
-				<ul>
-					<li><?php esc_html_e('"Clear all caches"', 'stifli-flex-mcp'); ?> → <code>w3tc_flush_all</code> / <code>rocket_clean_domain</code></li>
-					<li><?php esc_html_e('"Enable maintenance mode"', 'stifli-flex-mcp'); ?> → <code>sflmcp_maintenance_mode</code></li>
-					<li><?php esc_html_e('"Rebuild permalinks"', 'stifli-flex-mcp'); ?> → <code>flush_rewrite_rules</code></li>
-				</ul>
-			</div>
-
-			<div class="card">
-				<h4>📊 <?php esc_html_e('Business Integrations', 'stifli-flex-mcp'); ?></h4>
-				<ul>
-					<li><?php esc_html_e('"Log this conversation to Notion"', 'stifli-flex-mcp'); ?> → Notion API webhook</li>
-					<li><?php esc_html_e('"Create a support ticket in Jira"', 'stifli-flex-mcp'); ?> → Zapier/Make webhook</li>
-					<li><?php esc_html_e('"Send SMS notification"', 'stifli-flex-mcp'); ?> → Twilio API</li>
-				</ul>
-			</div>
-
-			<?php endif; ?>
-
 			<!-- SECTION: Security -->
 			<h2 id="security">🔐 <?php esc_html_e('Security Considerations', 'stifli-flex-mcp'); ?></h2>
 
 			<div class="card warning">
 				<h4><?php esc_html_e('Important Security Notes', 'stifli-flex-mcp'); ?></h4>
 				<ul>
-					<li><?php esc_html_e('All MCP requests require authentication (WordPress Application Passwords)', 'stifli-flex-mcp'); ?></li>
+					<li><?php esc_html_e('MCP clients should use OAuth 2.1; WordPress Application Passwords remain an advanced fallback', 'stifli-flex-mcp'); ?></li>
 					<li><?php esc_html_e('The AI operates with the permissions of the authenticated user', 'stifli-flex-mcp'); ?></li>
-					<li><?php esc_html_e('Custom Tools marked as "write" operations require confirmation', 'stifli-flex-mcp'); ?></li>
+					<li><?php esc_html_e('Write operations declare confirmation requirements and enforce WordPress capabilities', 'stifli-flex-mcp'); ?></li>
 					<li><?php esc_html_e('Disable tools you don\'t need in the Tools tabs', 'stifli-flex-mcp'); ?></li>
 					<li><?php esc_html_e('Use Profiles to limit available tools for specific use cases', 'stifli-flex-mcp'); ?></li>
 				</ul>
@@ -7250,21 +7409,27 @@ X-Custom-Header: value</code></pre>
 				<tr><th><?php esc_html_e('Problem', 'stifli-flex-mcp'); ?></th><th><?php esc_html_e('Solution', 'stifli-flex-mcp'); ?></th></tr>
 				<tr>
 					<td><?php esc_html_e('Tool not appearing for AI', 'stifli-flex-mcp'); ?></td>
-					<td><?php esc_html_e('Check that the tool is enabled (green checkmark in table)', 'stifli-flex-mcp'); ?></td>
+					<td><?php esc_html_e('Check the active profile, the Tools tab, and the relevant Plugin Integration. Reconnect the client after changing discovery.', 'stifli-flex-mcp'); ?></td>
 				</tr>
 				<tr>
-					<td><?php esc_html_e('ACTION returns "no handlers registered"', 'stifli-flex-mcp'); ?></td>
-					<td><?php esc_html_e('The hook name might be wrong, or the plugin that registers it is not active', 'stifli-flex-mcp'); ?></td>
+					<td><?php esc_html_e('OAuth discovery returns HTML or is blocked', 'stifli-flex-mcp'); ?></td>
+					<td><?php esc_html_e('Allow /.well-known/oauth-authorization-server and MCP OAuth REST routes in the host firewall, CDN, or Sucuri, then run the OAuth re-check.', 'stifli-flex-mcp'); ?></td>
 				</tr>
 				<tr>
-					<td><?php esc_html_e('HTTP webhook returns error', 'stifli-flex-mcp'); ?></td>
-					<td><?php esc_html_e('Use the "Test Tool" button to debug. Check URL, headers, and method', 'stifli-flex-mcp'); ?></td>
+					<td><?php esc_html_e('ChatGPT rejects a tool schema', 'stifli-flex-mcp'); ?></td>
+					<td><?php esc_html_e('Update the plugin, reconnect the client, and confirm that cached discovery data was refreshed.', 'stifli-flex-mcp'); ?></td>
 				</tr>
 				<tr>
-					<td><?php esc_html_e('Parameters not passed correctly', 'stifli-flex-mcp'); ?></td>
-					<td><?php esc_html_e('For GET: use {param} in URL. For POST: they\'re sent as JSON body', 'stifli-flex-mcp'); ?></td>
+					<td><?php esc_html_e('OAuth fails with Plain permalinks', 'stifli-flex-mcp'); ?></td>
+					<td><?php esc_html_e('Select Post name or another pretty permalink structure and save it before reconnecting.', 'stifli-flex-mcp'); ?></td>
 				</tr>
 			</table>
+
+			<div class="card">
+				<h4><?php esc_html_e('Copy-safe diagnostics', 'stifli-flex-mcp'); ?></h4>
+				<p><?php esc_html_e('This block omits access tokens, OAuth client secrets, user identities, and request payloads.', 'stifli-flex-mcp'); ?></p>
+				<textarea class="large-text code" rows="12" readonly><?php echo esc_textarea( $diagnostic_text ); ?></textarea>
+			</div>
 
 			<div class="card">
 				<h4>📝 <?php esc_html_e('Enable Logging', 'stifli-flex-mcp'); ?></h4>
@@ -7273,7 +7438,7 @@ X-Custom-Header: value</code></pre>
 
 			<hr class="sflmcp-help-separator">
 			<p class="sflmcp-help-footer">
-				<strong>StifLi Flex MCP</strong> - 
+				<strong>Flex MCP</strong> -
 				<a href="https://github.com/estebanstifli/stifli-flex-mcp" target="_blank">GitHub</a> | 
 				<a href="https://wordpress.org/plugins/stifli-flex-mcp/" target="_blank">WordPress.org</a>
 			</p>
@@ -7282,7 +7447,6 @@ X-Custom-Header: value</code></pre>
 	}
 	/* phpcs:enable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.InterpolatedNotPrepared,WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare,PluginCheck.Security.DirectDB.UnescapedDBParameter */
 }
-
 
 
 

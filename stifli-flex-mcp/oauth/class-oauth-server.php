@@ -85,14 +85,14 @@ class StifliFlexMcp_OAuth_Server {
 		}
 		$path = ( '/' !== $path ) ? untrailingslashit( $path ) : $path;
 
-		if ( '/.well-known/oauth-protected-resource' === $path ) {
+		if ( $this->is_mcp_well_known_path( $path, '/.well-known/oauth-protected-resource' ) ) {
 			if ( function_exists( 'stifli_flex_mcp_log' ) ) {
 				stifli_flex_mcp_log( 'OAuth: Serving protected resource metadata' );
 			}
-			$this->serve_protected_resource_metadata();
+			$this->send_json_and_exit( $this->protected_resource_metadata( false !== strpos( $path, '/messages' ) ? 'messages' : 'sse' ) );
 		}
 
-		if ( '/.well-known/oauth-authorization-server' === $path ) {
+		if ( $this->is_mcp_well_known_path( $path, '/.well-known/oauth-authorization-server' ) ) {
 			if ( function_exists( 'stifli_flex_mcp_log' ) ) {
 				stifli_flex_mcp_log( 'OAuth: Serving authorization server metadata (oauth-authorization-server)' );
 			}
@@ -103,7 +103,7 @@ class StifliFlexMcp_OAuth_Server {
 		// SDK tries: 1) /.well-known/oauth-authorization-server{path} (root, RFC 8414)
 		//            2) /.well-known/openid-configuration{path} (root, OIDC path)
 		//            3) {path}/.well-known/openid-configuration (this one reaches us!)
-		if ( '/.well-known/openid-configuration' === $path ) {
+		if ( $this->is_mcp_well_known_path( $path, '/.well-known/openid-configuration' ) ) {
 			if ( function_exists( 'stifli_flex_mcp_log' ) ) {
 				stifli_flex_mcp_log( 'OAuth: Serving authorization server metadata (openid-configuration fallback)' );
 			}
@@ -128,24 +128,57 @@ class StifliFlexMcp_OAuth_Server {
 	}
 
 	/**
+	 * Match root and RFC path-scoped discovery URLs for this MCP resource.
+	 *
+	 * @param string $path       Request path after removing the WordPress home path.
+	 * @param string $well_known Well-known endpoint path.
+	 * @return bool
+	 */
+	private function is_mcp_well_known_path( $path, $well_known ) {
+		if ( $well_known === $path ) {
+			return true;
+		}
+
+		foreach ( array( 'sse', 'messages' ) as $endpoint ) {
+			$resource_path = wp_parse_url( rest_url( $this->namespace . '/' . $endpoint ), PHP_URL_PATH );
+			$home_path = wp_parse_url( home_url(), PHP_URL_PATH );
+			if ( is_string( $resource_path ) && is_string( $home_path ) && '/' !== $home_path && 0 === strpos( $resource_path, $home_path . '/' ) ) {
+				$resource_path = substr( $resource_path, strlen( $home_path ) );
+			}
+			if ( is_string( $resource_path ) && $well_known . '/' . ltrim( $resource_path, '/' ) === $path ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
 	 * RFC 9728 - Protected Resource Metadata.
 	 */
 	private function serve_protected_resource_metadata() {
-		$metadata = array(
-			'resource'                => rest_url( $this->namespace . '/sse' ),
+		$this->send_json_and_exit( $this->protected_resource_metadata() );
+	}
+
+	private function protected_resource_metadata( $endpoint = 'sse' ) {
+		return array(
+			'resource'                => rest_url( $this->namespace . '/' . $endpoint ),
 			'authorization_servers'   => array( home_url() ),
 			'bearer_methods_supported' => array( 'header' ),
 			'scopes_supported'        => array( 'mcp' ),
 		);
 
-		$this->send_json_and_exit( $metadata );
 	}
 
 	/**
 	 * RFC 8414 - Authorization Server Metadata.
 	 */
 	private function serve_authorization_server_metadata() {
-		$metadata = array(
+		$this->send_json_and_exit( $this->authorization_server_metadata() );
+	}
+
+	private function authorization_server_metadata() {
+		return array(
 			'issuer'                                => home_url(),
 			'authorization_endpoint'                => home_url( '?sflmcp_oauth=authorize' ),
 			'token_endpoint'                        => rest_url( $this->namespace . '/oauth/token' ),
@@ -156,10 +189,10 @@ class StifliFlexMcp_OAuth_Server {
 			'grant_types_supported'                 => array( 'authorization_code', 'refresh_token' ),
 			'token_endpoint_auth_methods_supported' => array( 'none', 'client_secret_post', 'client_secret_basic' ),
 			'code_challenge_methods_supported'      => array( 'S256' ),
+			'authorization_response_iss_parameter_supported' => true,
+			'client_id_metadata_document_supported' => true,
 			'service_documentation'                 => 'https://modelcontextprotocol.io/',
 		);
-
-		$this->send_json_and_exit( $metadata );
 	}
 
 	/**
@@ -244,6 +277,10 @@ class StifliFlexMcp_OAuth_Server {
 		}
 
 		// Validate redirect_uri against registered URIs.
+		if ( $storage->client_is_pending( $client_id ) ) {
+			$this->show_authorize_error( 'This client is awaiting administrator approval.' );
+			return;
+		}
 		if ( ! $storage->validate_redirect_uri( $client, $redirect_uri ) ) {
 			$this->show_authorize_error( 'redirect_uri does not match any registered URI for this client.' );
 			return;
@@ -290,7 +327,7 @@ class StifliFlexMcp_OAuth_Server {
 				$code_challenge_method,
 				$resource
 			);
-			$redirect = add_query_arg( array( 'code' => $code, 'state' => $state ), $redirect_uri );
+			$redirect = add_query_arg( array( 'code' => $code, 'state' => $state, 'iss' => home_url() ), $redirect_uri );
 			wp_redirect( $redirect ); // phpcs:ignore WordPress.Security.SafeRedirect.wp_redirect_wp_redirect
 			exit;
 		}
@@ -330,11 +367,16 @@ class StifliFlexMcp_OAuth_Server {
 		}
 
 		// User denied access.
+		if ( ! current_user_can( 'edit_posts' ) || $storage->client_is_pending( $client_id ) ) {
+			$this->show_authorize_error( 'Authorization is not permitted.' );
+			return;
+		}
 		if ( 'approve' !== $decision ) {
 			$deny_url = add_query_arg(
 				array(
 					'error' => 'access_denied',
 					'state' => $state,
+					'iss' => home_url(),
 				),
 				$redirect_uri
 			);
@@ -358,6 +400,7 @@ class StifliFlexMcp_OAuth_Server {
 			array(
 				'code'  => $code,
 				'state' => $state,
+				'iss'   => home_url(),
 			),
 			$redirect_uri
 		);
@@ -483,6 +526,17 @@ class StifliFlexMcp_OAuth_Server {
 	 * Register OAuth REST routes.
 	 */
 	public function register_routes() {
+		foreach ( array( 'oauth-protected-resource', 'oauth-authorization-server', 'openid-configuration' ) as $discovery ) {
+			register_rest_route( $this->namespace, '/.well-known/' . $discovery, array(
+				'methods' => 'GET',
+				'permission_callback' => '__return_true',
+				'callback' => function( $request ) use ( $discovery ) {
+					$endpoint = 'messages' === $request->get_param( 'endpoint' ) ? 'messages' : 'sse';
+					$data = 'oauth-protected-resource' === $discovery ? $this->protected_resource_metadata( $endpoint ) : $this->authorization_server_metadata();
+					return $this->with_no_cache_headers( new WP_REST_Response( $data ) );
+				},
+			) );
+		}
 		// Dynamic Client Registration (RFC 7591).
 		// Accept both GET and POST — some clients probe with GET before POSTing.
 		register_rest_route( $this->namespace, '/oauth/register', array(
@@ -540,6 +594,10 @@ class StifliFlexMcp_OAuth_Server {
 	 */
 	public function handle_register( $request ) {
 		$this->log_rest_request( 'POST /oauth/register', $request );
+		$rate = StifliFlexMcpUtils::checkRateLimit( 'oauth-register:' . StifliFlexMcpUtils::getClientIp(), 10 );
+		if ( is_wp_error( $rate ) ) {
+			return $rate;
+		}
 		$auto_approve = get_option( 'sflmcp_oauth_auto_approve', '1' );
 		if ( '1' !== $auto_approve ) {
 			return $this->with_no_cache_headers( new WP_REST_Response(
@@ -570,6 +628,7 @@ class StifliFlexMcp_OAuth_Server {
 		}
 
 		$response = new WP_REST_Response( $result, 201 );
+		$storage->mark_new_client_for_review( $result['client_id'] );
 		return $this->with_no_cache_headers( $response );
 	}
 
@@ -660,7 +719,7 @@ class StifliFlexMcp_OAuth_Server {
 		}
 
 		// Verify the code belongs to this client.
-		if ( $code_record->client_id !== $client_id ) {
+		if ( $code_record->client_id !== $storage::client_storage_id( $client_id ) || $storage->client_is_pending( $client_id ) ) {
 			return $this->oauth_error( 'invalid_grant', 'Code was not issued to this client.', 400 );
 		}
 
@@ -734,6 +793,9 @@ class StifliFlexMcp_OAuth_Server {
 		}
 
 		// Rotate: revoke old, issue new.
+		if ( $storage->client_is_pending( $client_id ) ) {
+			return $this->oauth_error( 'invalid_client', 'Client awaits administrator approval.', 403 );
+		}
 		$tokens = $storage->refresh_token( $refresh_token, $client_id );
 		if ( is_wp_error( $tokens ) ) {
 			return $this->oauth_error( 'server_error', $tokens->get_error_message(), 500 );
@@ -815,7 +877,8 @@ class StifliFlexMcp_OAuth_Server {
 
 		if ( 401 === $response->get_status() ) {
 			if ( strpos( $route, '/' . $this->namespace ) === 0 ) {
-				$resource_metadata = home_url( '/.well-known/oauth-protected-resource' );
+				$endpoint = false !== strpos( $route, '/messages' ) ? 'messages' : 'sse';
+				$resource_metadata = add_query_arg( 'endpoint', $endpoint, rest_url( $this->namespace . '/.well-known/oauth-protected-resource' ) );
 				$www_auth = 'Bearer resource_metadata="' . $resource_metadata . '"';
 				$response->header( 'WWW-Authenticate', $www_auth );
 				if ( function_exists( 'stifli_flex_mcp_log' ) ) {
